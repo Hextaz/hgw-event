@@ -727,6 +727,137 @@ export function submitTmnfReplay(
 }
 
 /**
+ * Enregistre automatiquement un chrono envoyé en temps réel par le serveur dédié Trackmania (via le bridge XML-RPC GBXRemote 2).
+ * Associe le `playerLogin` TMNF au joueur HGW correspondant, attribue la médaille ou met à jour le Top 10 Hebdo,
+ * et crédite immédiatement `points_ledger` -> Classement Général.
+ */
+export function recordTmnfLiveServerFinish(
+  db: Database.Database,
+  params: {
+    playerLogin: string;
+    playerNickname?: string;
+    mapUid: string;
+    timeMs: number;
+  }
+): {
+  matchedUser: any | null;
+  map: any | null;
+  medal: 'author' | 'gold' | 'silver' | 'bronze' | 'none';
+  formattedTime: string;
+  deltaPoints: number;
+  isPersonalBest: boolean;
+} {
+  const loginClean = params.playerLogin.trim().toLowerCase();
+  const timeMs = Math.round(Number(params.timeMs));
+  if (!loginClean || !Number.isFinite(timeMs) || timeMs <= 1000) {
+    throw new Error('Paramètres de chrono serveur invalides.');
+  }
+
+  // Rechercher le joueur par tmnf_login ou fallback sur username
+  const user = db
+    .prepare(
+      `SELECT * FROM users
+       WHERE LOWER(tmnf_login) = ? OR LOWER(username) = ?
+       ORDER BY CASE WHEN LOWER(tmnf_login) = ? THEN 0 ELSE 1 END ASC
+       LIMIT 1`
+    )
+    .get(loginClean, loginClean, loginClean) as any;
+
+  const map = db.prepare(`SELECT * FROM tmnf_maps WHERE uid = ?`).get(params.mapUid.trim()) as any;
+  if (!user || !map) {
+    return {
+      matchedUser: user || null,
+      map: map || null,
+      medal: 'none',
+      formattedTime: formatTmTime(timeMs),
+      deltaPoints: 0,
+      isPersonalBest: false,
+    };
+  }
+
+  let medal: 'author' | 'gold' | 'silver' | 'bronze' | 'none' = 'none';
+  if (timeMs <= map.author_ms) medal = 'author';
+  else if (timeMs <= map.gold_ms) medal = 'gold';
+  else if (timeMs <= map.silver_ms) medal = 'silver';
+  else if (timeMs <= map.bronze_ms) medal = 'bronze';
+
+  const medalPoints = map.is_weekly ? 0 : MEDAL_POINTS[medal];
+
+  const prevBest = db
+    .prepare(
+      `SELECT MIN(time_ms) AS best_time_ms, MAX(points_awarded) AS max_pts
+       FROM tmnf_submissions
+       WHERE user_id = ? AND map_id = ?`
+    )
+    .get(user.id, map.id) as { best_time_ms: number | null; max_pts: number | null };
+
+  const isPersonalBest = prevBest?.best_time_ms === null || timeMs < prevBest.best_time_ms;
+  const previousPoints = prevBest?.max_pts || 0;
+  const newPoints = Math.max(previousPoints, medalPoints);
+  const deltaPoints = newPoints - previousPoints;
+
+  // N'insérer en base que si c'est un record personnel (évite de polluer avec 200 passages moins bons)
+  if (isPersonalBest || deltaPoints > 0) {
+    const syntheticHash = `live_xmlrpc_${user.id}_${map.id}_${timeMs}_${Date.now()}`;
+    const tx = db.transaction(() => {
+      if (!user.tmnf_login) {
+        db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(loginClean, user.id);
+      }
+
+      db.prepare(
+        `INSERT INTO tmnf_submissions (
+          user_id, map_id, time_ms, medal, points_awarded, player_login, player_nickname, replay_sha256, file_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        user.id,
+        map.id,
+        timeMs,
+        medal,
+        medalPoints,
+        loginClean,
+        params.playerNickname || user.display_name,
+        syntheticHash,
+        'live_server_xmlrpc'
+      );
+
+      if (!map.is_weekly && newPoints > 0) {
+        const sourceRef = `tmnf_medal:${user.id}:${map.id}`;
+        const bestMedalLabel =
+          newPoints === 30 ? 'Auteur' : newPoints === 20 ? 'Or' : newPoints === 10 ? 'Argent' : 'Bronze';
+
+        db.prepare(
+          `INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label, updated_at)
+           VALUES (?, 'tmnf_medal', ?, 'async', ?, ?, datetime('now'))
+           ON CONFLICT(source_ref) DO UPDATE SET
+             points = excluded.points,
+             label = excluded.label,
+             updated_at = datetime('now')`
+        ).run(
+          user.id,
+          sourceRef,
+          newPoints,
+          `🏅 TMNF ${map.code} — Médaille ${bestMedalLabel} (${formatTmTime(timeMs)} en direct serveur)`
+        );
+      }
+    });
+    tx();
+
+    if (map.is_weekly) {
+      recalculateWeeklyTmnfLeaderboard(db);
+    }
+  }
+
+  return {
+    matchedUser: user,
+    map,
+    medal,
+    formattedTime: formatTmTime(timeMs),
+    deltaPoints,
+    isPersonalBest,
+  };
+}
+
+/**
  * Algorithme de Tirage d'Équipes Équilibrées par Chapeaux (Pools 1 / 2 / 3) — Section 4.2 :
  * - En 3v3 (RL Rumble) : associe Chapeau 1 + Chapeau 2 + Chapeau 3.
  * - Gère proprement les cas où les pools n'ont pas exactement le même effectif ou si le nombre de joueurs au check-in n'est pas un multiple exact de `teamSize` (distribution serpentin équilibrée par niveau).

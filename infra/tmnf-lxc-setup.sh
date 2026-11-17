@@ -80,7 +80,7 @@ EOF
 
 chown -R tmnf:tmnf /opt/tmnf/GameData
 
-echo "[6/6] Création du service systemd tmnf.service..."
+echo "[6/6] Création des services systemd tmnf.service et tmnf-bridge.service (Sync Temps Réel XML-RPC -> HGW)..."
 cat <<'EOF' > /etc/systemd/system/tmnf.service
 [Unit]
 Description=Hextaz Games Week — Trackmania Nations Forever Dedicated Server
@@ -98,8 +98,32 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+cp -f "$(dirname "$0")/tmnf-xmlrpc-bridge.mjs" /opt/tmnf/tmnf-xmlrpc-bridge.mjs 2>/dev/null || true
+chown tmnf:tmnf /opt/tmnf/tmnf-xmlrpc-bridge.mjs 2>/dev/null || true
+
+cat <<'EOF' > /etc/systemd/system/tmnf-bridge.service
+[Unit]
+Description=Hextaz Games Week — Trackmania XML-RPC Live Webhook Bridge (GBXRemote 2)
+After=tmnf.service
+
+[Service]
+Type=simple
+User=tmnf
+WorkingDirectory=/opt/tmnf
+Environment=TMNF_XMLRPC_HOST=127.0.0.1
+Environment=TMNF_XMLRPC_PORT=5000
+Environment=HGW_WEBHOOK_URL=https://hgw.hextaz.dev/api/tmnf/webhook
+Environment=TMNF_WEBHOOK_SECRET=a_remplacer_par_votre_secret
+ExecStart=/usr/bin/env node /opt/tmnf/tmnf-xmlrpc-bridge.mjs
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl daemon-reload
 echo "✅ Provisioning terminé !"
-echo "👉 Étape 1 : Éditer /opt/tmnf/GameData/Config/dedicated_cfg.txt avec votre login/password serveur TMNF (<server_port>2350</server_port>)."
+echo "👉 Étape 1 : Éditer /opt/tmnf/GameData/Config/dedicated_cfg.txt avec votre login/password serveur TMNF (<server_port>2350</server_port>, <xmlrpc_port>5000</xmlrpc_port>)."
 echo "👉 Étape 2 : Lancer 'systemctl enable --now playit' puis 'playit setup' et créer un tunnel TCP+UDP vers 127.0.0.1:2350."
-echo "👉 Étape 3 : Lancer 'systemctl enable --now tmnf.service'."
+echo "👉 Étape 3 : Lancer 'systemctl enable --now tmnf.service tmnf-bridge.service'."

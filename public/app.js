@@ -1442,5 +1442,82 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // Formulaire de liaison du login Trackmania (pour la remontée auto depuis le serveur dédié)
+  document.getElementById('tmnf-login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!appState?.user) {
+      document.getElementById('login-modal').classList.add('open');
+      return;
+    }
+    const tmnfLogin = document.getElementById('tmnf-login-input').value.trim();
+    const res = await fetch('/api/profile/tmnf-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tmnfLogin }),
+    });
+    if (res.ok) {
+      showToast(`🔗 Login Trackmania lié : "${tmnfLogin}" ! Tes temps sur le serveur dédié remonteront automatiquement.`);
+      await fetchState();
+    }
+  });
+
+  // Simulation d'un passage de ligne d'arrivée en direct sur le serveur dédié (Webhook XML-RPC)
+  document.getElementById('sim-live-finish-btn').addEventListener('click', async () => {
+    const weeklyMap = (appState?.tmnfMaps || []).find((m) => m.is_weekly);
+    if (!weeklyMap) return;
+    const currentBest = appState?.weeklyTmnfLeaderboard?.[0]?.best_time_ms || 42500;
+    const newRecordMs = Math.max(38500, currentBest - Math.floor(Math.random() * 280) - 40);
+    const login = appState?.user?.tmnf_login || appState?.user?.username || 'hextaz';
+
+    const res = await fetch('/api/tmnf/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        playerLogin: login,
+        playerNickname: appState?.user?.display_name || 'Hextaz',
+        mapUid: weeklyMap.uid,
+        timeMs: newRecordMs,
+      }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast(`🏁 [Webhook XML-RPC] Nouveau record serveur en direct : ${data.formattedTime} !`);
+    }
+  });
+
+  // Connexion Temps Réel Server-Sent Events (SSE)
+  function connectRealtimeSse() {
+    const dot = document.getElementById('sse-status-dot');
+    const es = new EventSource('/api/events');
+
+    es.onopen = () => {
+      if (dot) {
+        dot.style.color = 'var(--accent-emerald)';
+        dot.textContent = '● Live';
+      }
+    };
+
+    es.onmessage = async (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === 'connected') return;
+        if (payload.message) {
+          showToast(payload.message);
+        }
+        await fetchState();
+      } catch {
+        // ignore heartbeat parse
+      }
+    };
+
+    es.onerror = () => {
+      if (dot) {
+        dot.style.color = 'var(--accent-gold)';
+        dot.textContent = '○ Reconnexion...';
+      }
+    };
+  }
+
   await fetchState();
+  connectRealtimeSse();
 });

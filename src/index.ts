@@ -15,6 +15,7 @@ import {
   getGlobalLeaderboard,
   getParisDayAndWeekKey,
   recalculateWeeklyTmnfLeaderboard,
+  recordTmnfLiveServerFinish,
   recordTournamentPlacements,
   rerollDailyAssignment,
   reviewDailyAssignment,
@@ -37,8 +38,23 @@ const HOST = process.env.HOST || '127.0.0.1';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'hgw-dev-secret-change-in-production-2026';
 const COOKIE_NAME = 'hgw_session';
 
+// Hub Temps Réel SSE (Server-Sent Events)
+const sseClients = new Set<Response>();
+function broadcastRealtimeEvent(type: string, message?: string, payload?: any): void {
+  const data = JSON.stringify({ type, message, payload, ts: Date.now() });
+  for (const client of sseClients) {
+    try {
+      client.write(`data: ${data}\n\n`);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
 const { db, proofsDir, replaysDir } = initDb();
-const bot = new HgwDiscordBot(db, proofsDir);
+const bot = new HgwDiscordBot(db, proofsDir, (msg) => {
+  broadcastRealtimeEvent('points_updated', msg);
+});
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -433,6 +449,31 @@ app.get('/api/state', (req: AuthedRequest, res) => {
   });
 });
 
+// Flux Temps Réel Server-Sent Events (SSE)
+app.get('/api/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  res.write(`data: ${JSON.stringify({ type: 'connected', ts: Date.now() })}\n\n`);
+  sseClients.add(res);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: heartbeat\n\n`);
+    } catch {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    }
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
+});
+
 // Détail complet du journal de points (points_ledger) d'un joueur au clic sur le classement
 app.get('/api/player/:id/ledger', (req, res) => {
   const userId = String(req.params.id);
@@ -465,6 +506,14 @@ app.get('/api/player/:id/ledger', (req, res) => {
     selectedGames,
     entries,
   });
+});
+
+// Liaison directe du Login Trackmania (pour remontée auto des chronos depuis le serveur dédié)
+app.post('/api/profile/tmnf-login', requireAuth, (req: AuthedRequest, res) => {
+  const tmnfLogin = String(req.body.tmnfLogin || '').trim().slice(0, 40);
+  db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(tmnfLogin || null, req.user.id);
+  broadcastRealtimeEvent('profile_updated');
+  res.json({ ok: true, tmnfLogin: tmnfLogin || null });
 });
 
 // Mise à jour du profil (jeux cochés + login TMNF optionnel)
@@ -513,6 +562,7 @@ app.post('/api/quests/:id/submit', requireAuth, proofUpload.single('proofFile'),
     });
 
     await bot.notifyProofSubmitted(updated);
+    broadcastRealtimeEvent('proof_submitted', `🕵️ ${req.user.display_name} a soumis une preuve sur ${updated.game_name}`);
     res.json({ ok: true, assignment: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Échec de l’envoi de la preuve.' });
@@ -520,7 +570,7 @@ app.post('/api/quests/:id/submit', requireAuth, proofUpload.single('proofFile'),
 });
 
 // ============================================================================
-// TRACKMANIA (.Replay.gbx) UPLOAD & GÉNÉRATEUR DE REPLAY DE TEST
+// TRACKMANIA (.Replay.gbx) UPLOAD + WEBHOOK TEMPS RÉEL SERVEUR DÉDIÉ
 // ============================================================================
 
 app.post('/api/tmnf/submit-replay', requireAuth, gbxUpload.single('replay'), (req: AuthedRequest, res) => {
@@ -538,9 +588,13 @@ app.post('/api/tmnf/submit-replay', requireAuth, gbxUpload.single('replay'), (re
       explicitMapId,
     });
 
-    // Sauvegarder une copie d'archive dans /data/replays
     const safeReplayName = `${Date.now()}_${req.user.id}_${result.map.code}.Replay.gbx`;
     fs.writeFileSync(path.join(replaysDir, safeReplayName), req.file.buffer);
+
+    broadcastRealtimeEvent(
+      'tmnf_replay',
+      `🏎️ ${req.user.display_name} a signé ${result.parsed.formattedTime} sur ${result.map.code}${result.deltaPoints > 0 ? ` (+${result.deltaPoints} pts)` : ''}`
+    );
 
     res.json({
       ok: true,
@@ -559,6 +613,42 @@ app.post('/api/tmnf/submit-replay', requireAuth, gbxUpload.single('replay'), (re
   }
 });
 
+/**
+ * Webhook Temps Réel appelé automatiquement par le bridge XML-RPC du serveur dédié Trackmania (`infra/tmnf-xmlrpc-bridge.mjs`)
+ * dès qu'un joueur franchit la ligne d'arrivée en jeu (`TrackMania.PlayerFinish`).
+ */
+app.post('/api/tmnf/webhook', (req: AuthedRequest, res) => {
+  const configuredSecret = process.env.TMNF_WEBHOOK_SECRET?.trim();
+  const headerSecret = String(req.headers['x-tmnf-secret'] || '');
+  const isAdminSession = req.user?.is_admin === 1;
+
+  if (configuredSecret && headerSecret !== configuredSecret && !isAdminSession) {
+    res.status(401).json({ error: 'Signature X-TMNF-Secret invalide.' });
+    return;
+  }
+
+  try {
+    const { playerLogin, playerNickname, mapUid, timeMs } = req.body;
+    const out = recordTmnfLiveServerFinish(db, {
+      playerLogin: String(playerLogin || ''),
+      playerNickname: playerNickname ? String(playerNickname) : undefined,
+      mapUid: String(mapUid || ''),
+      timeMs: Number(timeMs),
+    });
+
+    if (out.matchedUser && out.map && (out.isPersonalBest || out.deltaPoints > 0)) {
+      broadcastRealtimeEvent(
+        'tmnf_live_finish',
+        `🏁 [Serveur TMNF Live] ${out.matchedUser.display_name} vient de rouler ${out.formattedTime} sur ${out.map.code}${out.deltaPoints > 0 ? ` (+${out.deltaPoints} pts)` : ' (Nouveau PB !)'}`
+      );
+    }
+
+    res.json({ ok: true, ...out });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Erreur webhook TMNF.' });
+  }
+});
+
 // Permet de télécharger un fichier .Replay.gbx d'exemple valide pour tester l'upload en 1 clic
 app.get('/api/tmnf/sample-replay/:mapId', requireAuth, (req: AuthedRequest, res) => {
   const map = db.prepare(`SELECT * FROM tmnf_maps WHERE id = ?`).get(String(req.params.mapId)) as any;
@@ -567,7 +657,6 @@ app.get('/api/tmnf/sample-replay/:mapId', requireAuth, (req: AuthedRequest, res)
     return;
   }
 
-  // Génère un temps médaille Auteur légèrement meilleur que le seuil Auteur
   const sampleTime = map.author_ms - Math.floor(Math.random() * 350) - 40;
   const login = req.user.tmnf_login || req.user.username || 'hgw_pilot';
   const buf = buildSampleReplayGbx({
@@ -607,11 +696,13 @@ app.post('/api/tournaments/:id/toggle', requireAuth, (req: AuthedRequest, res) =
       tournamentId,
       req.user.id
     );
+    broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true, registered: false });
   } else {
     db.prepare(
       `INSERT INTO tournament_registrations (tournament_id, user_id, pool, checked_in) VALUES (?, ?, 2, 0)`
     ).run(tournamentId, req.user.id);
+    broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true, registered: true });
   }
 });
@@ -632,6 +723,12 @@ app.post('/api/admin/proofs/:id/review', requireAdmin, (req: AuthedRequest, res)
       reviewerId: req.user.display_name,
       rejectReason,
     });
+    broadcastRealtimeEvent(
+      'points_updated',
+      action === 'approve'
+        ? `✅ ${updated.display_name} a validé "${updated.title}" (+${updated.points} pts)`
+        : undefined
+    );
     res.json({ ok: true, assignment: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -659,6 +756,7 @@ app.post('/api/admin/tournaments/:id/player', requireAdmin, (req: AuthedRequest,
       userId
     );
   }
+  broadcastRealtimeEvent('tournament_updated');
   res.json({ ok: true });
 });
 
@@ -669,6 +767,7 @@ app.post('/api/admin/tournaments/:id/draw-teams', requireAdmin, async (req: Auth
     if (req.body.announceDiscord) {
       await bot.announceTeams(result.tournament, result.teams);
     }
+    broadcastRealtimeEvent('teams_drawn', `🎲 Les équipes de ${result.tournament.name} viennent d'être tirées au sort !`);
     res.json({ ok: true, ...result });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -679,6 +778,7 @@ app.post('/api/admin/tournaments/:id/placements', requireAdmin, (req: AuthedRequ
   try {
     const placements = Array.isArray(req.body.placements) ? req.body.placements : [];
     recordTournamentPlacements(db, String(req.params.id), placements);
+    broadcastRealtimeEvent('points_updated', '🏆 Classement de tournoi mis à jour !');
     res.json({ ok: true });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -689,6 +789,7 @@ app.post('/api/admin/fall-guys/scores', requireAdmin, (req: AuthedRequest, res) 
   try {
     const scores = Array.isArray(req.body.scores) ? req.body.scores : [];
     const updated = updateFallGuysScoresAndRankings(db, scores);
+    broadcastRealtimeEvent('points_updated', '🫘 Scores Fall Guys mis à jour en direct !');
     res.json({ ok: true, standings: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -697,6 +798,7 @@ app.post('/api/admin/fall-guys/scores', requireAdmin, (req: AuthedRequest, res) 
 
 app.post('/api/admin/cron/trigger', requireAdmin, (_req: AuthedRequest, res) => {
   const result = runNightlyDailyReset(db);
+  broadcastRealtimeEvent('daily_reset', '⏰ Nouveaux défis quotidiens générés !');
   res.json({ ok: true, ...result });
 });
 

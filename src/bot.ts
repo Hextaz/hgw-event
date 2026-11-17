@@ -30,10 +30,12 @@ export class HgwDiscordBot {
   private db: Database.Database;
   private proofsDir: string;
   private isReady = false;
+  private onStateChanged?: (eventLabel: string) => void;
 
-  constructor(db: Database.Database, proofsDir: string) {
+  constructor(db: Database.Database, proofsDir: string, onStateChanged?: (eventLabel: string) => void) {
     this.db = db;
     this.proofsDir = proofsDir;
+    this.onStateChanged = onStateChanged;
   }
 
   public getStatus(): { enabled: boolean; ready: boolean; tag?: string } {
@@ -251,6 +253,7 @@ export class HgwDiscordBot {
         embeds: [approvedEmbed],
         components: [],
       });
+      this.onStateChanged?.(`✅ ${updated.display_name} a validé "${updated.title}" (+${updated.points} pts)`);
       return;
     }
 
@@ -304,6 +307,7 @@ export class HgwDiscordBot {
       });
     }
 
+    this.onStateChanged?.(`Preuve #${assignmentId} mise à jour`);
     await interaction.reply({
       content: `❌ Preuve #${assignmentId} de **${updated.display_name}** refusée (${reason}).`,
       ephemeral: true,

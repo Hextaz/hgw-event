@@ -7,6 +7,7 @@ import {
   drawDailyQuestsForUser,
   generateBalancedTeams,
   getGlobalLeaderboard,
+  recordTmnfLiveServerFinish,
   rerollDailyAssignment,
   reviewDailyAssignment,
   runNightlyDailyReset,
@@ -211,6 +212,25 @@ async function runTests() {
     u1Row.total_points,
     qTarget.points + 30 + 200,
     'Le total de u1 dans points_ledger doit être Défi + Médaille Auteur (30) + 1er Fall Guys (200)'
+  );
+
+  // 8. Test de la remontée automatique depuis le serveur dédié Trackmania (XML-RPC Webhook)
+  const weeklyMap = db.prepare(`SELECT * FROM tmnf_maps WHERE is_weekly = 1 LIMIT 1`).get() as any;
+  const liveFinishWeekly = recordTmnfLiveServerFinish(db, {
+    playerLogin: 'hextaz_tm',
+    playerNickname: 'Hextaz',
+    mapUid: weeklyMap.uid,
+    timeMs: 41250,
+  });
+  assert.equal(liveFinishWeekly.isPersonalBest, true);
+  assert.equal(liveFinishWeekly.matchedUser.id, 'u1');
+
+  const lbAfterLive = getGlobalLeaderboard(db);
+  const u1AfterLive = lbAfterLive.find((r) => r.id === 'u1');
+  assert.equal(
+    u1AfterLive.total_points,
+    qTarget.points + 30 + 200 + 150,
+    'Le 1er temps sur la map hebdo depuis le serveur dédié doit créditer automatiquement +150 pts au classement général'
   );
 
   console.log('✅ Tous les tests unitaires et d’intégration HGW sont passés avec succès !');
