@@ -275,14 +275,45 @@ app.get('/api/state', (req: AuthedRequest, res) => {
   const leaderboard = getGlobalLeaderboard(db);
   const weeklyTmnf = recalculateWeeklyTmnfLeaderboard(db);
 
+  // Records du serveur (WR Discord) par map Trackmania
+  const wrRows = db
+    .prepare(
+      `SELECT ts.map_id, ts.time_ms, u.display_name
+       FROM tmnf_submissions ts
+       JOIN users u ON u.id = ts.user_id
+       WHERE ts.time_ms = (
+         SELECT MIN(t2.time_ms) FROM tmnf_submissions t2 WHERE t2.map_id = ts.map_id
+       )
+       GROUP BY ts.map_id`
+    )
+    .all() as { map_id: string; time_ms: number; display_name: string }[];
+  const wrByMap = new Map(wrRows.map((r) => [r.map_id, r]));
+
   const tmnfMaps = db.prepare(`SELECT * FROM tmnf_maps ORDER BY sort_order ASC`).all() as any[];
-  const formattedMaps = tmnfMaps.map((m) => ({
-    ...m,
-    author_formatted: formatTmTime(m.author_ms),
-    gold_formatted: formatTmTime(m.gold_ms),
-    silver_formatted: formatTmTime(m.silver_ms),
-    bronze_formatted: formatTmTime(m.bronze_ms),
-  }));
+  const formattedMaps = tmnfMaps.map((m) => {
+    const wr = wrByMap.get(m.id);
+    return {
+      ...m,
+      author_formatted: formatTmTime(m.author_ms),
+      gold_formatted: formatTmTime(m.gold_ms),
+      silver_formatted: formatTmTime(m.silver_ms),
+      bronze_formatted: formatTmTime(m.bronze_ms),
+      wr_time_ms: wr ? wr.time_ms : null,
+      wr_formatted: wr ? formatTmTime(wr.time_ms) : null,
+      wr_holder: wr ? wr.display_name : null,
+    };
+  });
+
+  // Fil d'activité global en direct (25 derniers mouvements de points)
+  const recentFeed = db
+    .prepare(
+      `SELECT pl.*, u.display_name, u.avatar
+       FROM points_ledger pl
+       JOIN users u ON u.id = pl.user_id
+       ORDER BY pl.updated_at DESC, pl.id DESC
+       LIMIT 25`
+    )
+    .all();
 
   const tournaments = db.prepare(`SELECT * FROM tournaments ORDER BY sort_order ASC`).all() as any[];
   const allRegs = db
@@ -307,6 +338,7 @@ app.get('/api/state', (req: AuthedRequest, res) => {
 
   let mySelectedGames: string[] = [];
   let myDailyQuests: any[] = [];
+  let myWeeklyGameCounts: Record<string, number> = {};
   let myTmnfSubmissions: any[] = [];
   let myLedger: any[] = [];
   let canRerollToday = false;
@@ -318,6 +350,19 @@ app.get('/api/state', (req: AuthedRequest, res) => {
 
     if (mySelectedGames.length >= 4) {
       myDailyQuests = drawDailyQuestsForUser(db, req.user.id);
+    }
+
+    const weeklyRows = db
+      .prepare(
+        `SELECT q.game_id, COUNT(*) AS cnt
+         FROM daily_assignments da
+         JOIN quests q ON q.id = da.quest_id
+         WHERE da.user_id = ? AND da.week_key = ? AND da.status IN ('validated', 'submitted')
+         GROUP BY q.game_id`
+      )
+      .all(req.user.id, weekKey) as { game_id: string; cnt: number }[];
+    for (const r of weeklyRows) {
+      myWeeklyGameCounts[r.game_id] = r.cnt;
     }
 
     myTmnfSubmissions = db
@@ -374,15 +419,51 @@ app.get('/api/state', (req: AuthedRequest, res) => {
     user: req.user || null,
     mySelectedGames,
     myDailyQuests,
+    myWeeklyGameCounts,
     canRerollToday,
     myTmnfSubmissions,
     myLedger,
+    recentFeed,
     games,
     tmnfMaps: formattedMaps,
     weeklyTmnfLeaderboard: weeklyTmnf,
     tournaments: tournamentsWithRegs,
     leaderboard,
     admin: req.user?.is_admin === 1 ? { pendingProofs, allUsers } : null,
+  });
+});
+
+// Détail complet du journal de points (points_ledger) d'un joueur au clic sur le classement
+app.get('/api/player/:id/ledger', (req, res) => {
+  const userId = String(req.params.id);
+  const player = db
+    .prepare(`SELECT id, username, display_name, avatar, tmnf_login, created_at FROM users WHERE id = ?`)
+    .get(userId) as any;
+
+  if (!player) {
+    res.status(404).json({ error: 'Joueur introuvable.' });
+    return;
+  }
+
+  const entries = db
+    .prepare(`SELECT * FROM points_ledger WHERE user_id = ? ORDER BY updated_at DESC, id DESC`)
+    .all(userId);
+
+  const selectedGames = db
+    .prepare(
+      `SELECT g.id, g.name, g.short_name, g.emoji
+       FROM user_games ug
+       JOIN games g ON g.id = ug.game_id
+       WHERE ug.user_id = ?
+       ORDER BY g.sort_order ASC`
+    )
+    .all(userId);
+
+  res.json({
+    ok: true,
+    player,
+    selectedGames,
+    entries,
   });
 });
 
