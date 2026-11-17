@@ -292,6 +292,14 @@
               meilleur temps personnel et le <strong>delta exact au millième</strong> vers la médaille supérieure.
             </p>
           </div>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap">
+            <button type="button" class="btn btn-secondary btn-sm" id="copy-replays-path-btn">
+              📂 Copier le chemin Windows des Replays
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="open-guide-from-tm-btn">
+              📖 Voir le Tuto Illustré Pas-à-Pas
+            </button>
+          </div>
         </div>
         <div class="track-cards-grid" id="track-cards-grid"></div>
       </section>
@@ -315,14 +323,163 @@
         <div class="grid-2" id="tournaments-grid"></div>
       </section>
 
-      <!-- VUE 5 : BACK-OFFICE ADMIN -->
+      <!-- VUE 5 : GUIDE COMPLET (ENREGISTRER UN REPLAY .GBX, SERVEUR CHRONO, RÈGLEMENT & PLANNING) -->
+      <section class="view-section" id="view-guide">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">📖 Guide Pratique : Trackmania `.Replay.gbx`, Preuves & Règlement HGW</h2>
+            <p class="section-desc">
+              Tout ce qu'il faut savoir en 2 minutes pour installer Trackmania gratuitement, enregistrer tes replays sur
+              les maps médailles ou sur le serveur dédié, et valider tes défis quotidiens.
+            </p>
+          </div>
+        </div>
+
+        <div class="grid-2" style="margin-bottom: 1.5rem">
+          <!-- GUIDE 1 : LES 8 MAPS CHASSE AUX MÉDAILLES (SOLO -> FICHIER .REPLAY.GBX) -->
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">🏅 1. Comment enregistrer & publier un `.Replay.gbx` (8 Maps Médailles)</h3>
+              <span class="badge badge-hard">Jusqu'à 240 pts</span>
+            </div>
+            <ol style="padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.7rem; font-size: 0.88rem; color: var(--text-secondary)">
+              <li>
+                <strong>Lance une des 8 pistes officielles :</strong> Dans Trackmania Nations Forever, va dans
+                <strong>Jeu Solo ➔ Parcourir</strong> et lance l'une des 8 pistes de la sélection (<code>A01-Race</code>,
+                <code>A02-Race</code>, <code>A06-Obstacle</code>, <code>A07-Race</code>, <code>B02-Race</code>,
+                <code>B05-Race</code>, <code>B08-Obstacle</code> ou <code>C04-Race</code>).
+              </li>
+              <li>
+                <strong>Sauvegarde ton Replay en fin de course :</strong> Dès que tu franchis la ligne d'arrivée, sur
+                l'écran qui affiche ta médaille et ton temps, clique sur le bouton
+                <strong style="color: var(--accent-gold)">« Sauver le Replay »</strong> (ou appuie sur
+                <kbd>Échap</kbd> ➔ <strong>Sauver le Replay</strong>).
+              </li>
+              <li>
+                <strong>Trouve ton fichier <code>.Replay.gbx</code> sur ton PC :</strong> Tes replays sont enregistrés
+                automatiquement par le jeu dans ton dossier Documents :
+                <div
+                  style="
+                    background: var(--bg-elevated);
+                    padding: 0.55rem 0.75rem;
+                    border-radius: var(--radius-sm);
+                    border: 1px solid var(--border-subtle);
+                    margin-top: 0.35rem;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    gap: 0.5rem;
+                    flex-wrap: wrap;
+                  "
+                >
+                  <code class="mono" style="font-size: 0.76rem; color: var(--accent-emerald)">
+                    %USERPROFILE%\Documents\TrackMania\Tracks\Replays\Replays
+                  </code>
+                  <button type="button" class="btn btn-secondary btn-sm" id="guide-copy-path-btn">
+                    📋 Copier le chemin
+                  </button>
+                </div>
+                <span style="font-size: 0.78rem; color: var(--text-muted); display: block; margin-top: 0.25rem">
+                  💡 <em>Astuce Windows : quand la fenêtre « Choisir un fichier » s'ouvre sur le site, colle ce chemin
+                  directement dans la barre d'adresse en haut et appuie sur Entrée !</em>
+                </span>
+              </li>
+              <li>
+                <strong>Dépose-le sur l'onglet 🏎️ Trackmania :</strong> Le site vérifie instantanément l'UID de la map,
+                ton login et ton chrono au millième, puis crédite tes points (Bronze = 5, Argent = 10, Or = 20, Auteur =
+                30 pts) sans attendre un admin !
+              </li>
+            </ol>
+          </div>
+
+          <!-- GUIDE 2 : LE CHRONO DE LA SEMAINE SUR LE SERVEUR DÉDIÉ -->
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">⏱️ 2. Comment jouer le Chrono de la Semaine sur le Serveur HGW</h3>
+              <span class="badge badge-easy">Top 10 = jusqu'à 150 pts</span>
+            </div>
+            <ol style="padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.7rem; font-size: 0.88rem; color: var(--text-secondary)">
+              <li>
+                <strong>Lie ton Login Trackmania (1 seule fois) :</strong> Dans l'onglet <strong>🏎️ Trackmania</strong>,
+                entre ton identifiant de connexion Trackmania (ton <em>login</em> de compte, visible en haut à droite
+                dans le menu du jeu) et clique sur <strong>« Lier mon compte TMNF »</strong>.
+              </li>
+              <li>
+                <strong>Rejoins le serveur dédié HGW (sans VPN) :</strong> Clique sur le bouton
+                <strong style="color: var(--accent-gold)">« 🚀 Rejoindre en 1 clic »</strong> sur le site (ou utilise
+                l'adresse <code>playit.gg</code> affichée). Le serveur tourne 24h/24 en mode <em>TimeAttack</em> sur la
+                Map de la Semaine jusqu'au <strong>samedi 20h30</strong>.
+              </li>
+              <li>
+                <strong>Méthode A — Remontée 100% Automatique en direct :</strong> Dès que tu franchis la ligne
+                d'arrivée sur le serveur, notre bridge <code>XML-RPC</code> détecte ton chrono et met à jour le
+                <strong>Top 10 de la Semaine</strong> et le <strong>Classement Général</strong> en temps réel !
+              </li>
+              <li>
+                <strong>Méthode B — Secours par fichier <code>.Replay.gbx</code> :</strong> En fin de manche sur le
+                serveur, tu peux aussi cliquer sur <strong>« Sauver le Replay »</strong> et glisser ton fichier
+                <code>.Replay.gbx</code> sur le site : il mettra lui aussi à jour ton temps sur le Chrono Hebdo !
+              </li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <!-- GUIDE 3 : ENVOYER SES PREUVES DE DÉFIS EN 3 SECONDES -->
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">📸 3. Envoyer une preuve de Défi Quotidien en 3 secondes</h3>
+              <span class="badge badge-medium">3 défis / jour (80 pts/j)</span>
+            </div>
+            <ul style="padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.6rem; font-size: 0.88rem; color: var(--text-secondary)">
+              <li>
+                <strong>Raccourci PC ultra-rapide (`Win + Shift + S` puis `Ctrl + V`) :</strong> Prends une capture de
+                ton écran de fin de partie avec <kbd>Win + Shift + S</kbd> (ou <kbd>Impr. écran</kbd>), clique sur
+                <strong>« 📤 Envoyer ma preuve »</strong> sur ta carte de défi, et fais directement
+                <strong style="color: var(--accent-emerald)"><kbd>Ctrl + V</kbd></strong> : l'image est collée sans
+                créer de fichier !
+              </li>
+              <li>
+                <strong>Pour les défis demandant un Clip vidéo (10–15s) :</strong> Utilise <em>Medal.tv</em>,
+                <em>NVIDIA ShadowPlay</em>, <em> barre de jeu Xbox (`Win + Alt + G`)</em> ou le bouton Capture de la
+                Switch, puis colle le lien ou le fichier `.mp4`.
+              </li>
+              <li>
+                <strong>1 Reroll gratuit par jour :</strong> Si tu tombes sur un défi qui ne t'inspire pas, clique sur
+                <strong>« 🎲 Reroll (1/j) »</strong> pour tirer un autre défi de la <strong>même difficulté</strong>.
+              </li>
+            </ul>
+          </div>
+
+          <!-- GUIDE 4 : PLANNING OFFICIEL & BARÈME 50/50 -->
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">📅 4. Planning du Week-end & Règles d'Équilibrage</h3>
+              <span class="badge badge-hard">50% Async / 50% Live</span>
+            </div>
+            <ul style="padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.86rem; color: var(--text-secondary)">
+              <li><strong>Lundi ➔ Vendredi :</strong> Défis quotidiens (reset 03h00) + Serveur Trackmania 24h/24.</li>
+              <li><strong>Vendredi 20h00 :</strong> 🎙️ Kickoff en vocal Discord (point classement & questions).</li>
+              <li><strong>Samedi 15h00 (Check-in 14h45) :</strong> 🥊 <strong>Tournoi #1 — Brawlhalla</strong> (1er = 200 pts).</li>
+              <li><strong>Samedi 20h30 :</strong> 🏁 Clôture du Chrono Hebdo Trackmania + Échauffement serveur.</li>
+              <li><strong>Samedi 21h00 – 21h30 :</strong> 🏎️ <strong>Tournoi #2 — Cup Trackmania Live</strong> (12 courses max, 1er = 150 pts).</li>
+              <li><strong>Samedi 21h30 :</strong> 🎲 Tirage au sort en direct des équipes par <strong>Chapeaux (Pool 1 + 2 + 3)</strong>.</li>
+              <li><strong>Samedi 21h45 – 23h15 :</strong> 🚗 <strong>Tournoi #3 — Rocket League RUMBLE</strong> (1er = 300 pts / joueur).</li>
+              <li><strong>Dimanche 16h00 – 17h00 :</strong> 🫘 <strong>Tournoi #4 — Fall Guys</strong> (5 parties cumulées, 1er = 200 pts).</li>
+              <li><strong>Dimanche 18h00 :</strong> 🎉 <strong>Podium Final & Tirage de la Grande Tombola (seuil ≥ 300 pts)</strong> !</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- VUE 6 : COCKPIT / DASHBOARD ADMIN COMPLET -->
       <section class="view-section" id="view-admin">
         <div class="section-header">
           <div>
-            <h2 class="section-title">🛡️ Back-Office Organisateur HGW</h2>
+            <h2 class="section-title">🛡️ Dashboard Organisateur HGW (Cockpit Admin)</h2>
             <p class="section-desc">
-              Validation des preuves en 1 clic, attribution des Chapeaux (Pool 1/2/3), tirage équilibré en direct et
-              calculateur officiel des 5 parties de Fall Guys.
+              Pilote les dates de début et de fin de la HGW, valide les preuves, gère les Chapeaux et les classements
+              des tournois, et lance le tirage officiel de la Tombola.
             </p>
           </div>
           <div style="display: flex; gap: 0.6rem; flex-wrap: wrap">
@@ -330,11 +487,93 @@
               ✨ Peupler / Réinitialiser 12 Joueurs de Démo
             </button>
             <button type="button" class="btn btn-secondary btn-sm" id="admin-cron-btn">
-              ⏰ Simuler le Reset 03h00
+              ⏰ Forcer le Tirage Quotidien (Reset 03h00)
             </button>
           </div>
         </div>
 
+        <!-- KPIS TEMPS RÉEL DU DASHBOARD ADMIN -->
+        <div
+          id="admin-kpis-grid"
+          style="
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+            gap: 0.85rem;
+            margin-bottom: 1.5rem;
+          "
+        ></div>
+
+        <!-- CONFIGURATION DES DATES DE DÉBUT / FIN DE LA HGW & SERVEUR TMNF -->
+        <div class="card" style="margin-bottom: 1.5rem">
+          <div class="card-header">
+            <div>
+              <h3 class="card-title">📅 Programmation Officielle : Début, Clôture TMNF & Fin de la HGW</h3>
+              <p class="section-desc">
+                Définis quand démarre et quand se termine la HGW. En mode <strong>Automatique</strong>, le site passe
+                tout seul de <em>Pré-Inscriptions</em> ➔ <em>Event En Cours</em> ➔ <em>Event Clôturé</em> aux dates
+                indiquées.
+              </p>
+            </div>
+            <span class="badge badge-hard" id="admin-phase-badge">Phase : En cours</span>
+          </div>
+
+          <form id="admin-settings-form">
+            <div class="grid-3" style="margin-bottom: 1rem">
+              <div>
+                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                  Mode de pilotage de la phase
+                </label>
+                <select id="cfg-status-mode" class="select-field">
+                  <option value="auto">🤖 Automatique selon les dates ci-contre</option>
+                  <option value="registration">📝 Forcer : Inscriptions Pré-Event</option>
+                  <option value="live">🔥 Forcer : Event En Cours (Ouvert)</option>
+                  <option value="closed">🔒 Forcer : Event Clôturé (Gel des points)</option>
+                </select>
+              </div>
+              <div>
+                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                  🟢 Début officiel de la HGW (Lundi)
+                </label>
+                <input type="datetime-local" id="cfg-start-at" class="input-field mono" />
+              </div>
+              <div>
+                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                  🏁 Fin du Chrono Hebdo TMNF (Samedi 20h30)
+                </label>
+                <input type="datetime-local" id="cfg-tmnf-cutoff-at" class="input-field mono" />
+              </div>
+            </div>
+
+            <div class="grid-3" style="margin-bottom: 1rem">
+              <div>
+                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                  🔴 Fin de la HGW & Cérémonie (Dimanche 18h00)
+                </label>
+                <input type="datetime-local" id="cfg-end-at" class="input-field mono" />
+              </div>
+              <div>
+                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                  🏎️ Adresse Tunnel `playit.gg` (Serveur TMNF)
+                </label>
+                <input type="text" id="cfg-playit-addr" class="input-field mono" placeholder="hgw-tmnf.playit.gg:2350" />
+              </div>
+              <div>
+                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                  🗺️ UID de la Map Perso Hebdo TMNF (`<challenge uid="...">`)
+                </label>
+                <input type="text" id="cfg-weekly-uid" class="input-field mono" placeholder="UID de ta map HGW" />
+              </div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end">
+              <button type="submit" class="btn btn-primary btn-sm">
+                💾 Enregistrer les Dates & Paramètres de la HGW
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <!-- FILE D'ATTENTE DES PREUVES -->
         <div class="card" style="margin-bottom: 1.5rem">
           <div class="card-header">
             <h3 class="card-title">🕵️ Preuves en attente de validation (`#preuves`)</h3>
@@ -342,10 +581,11 @@
           <div id="admin-proofs-list"></div>
         </div>
 
-        <div class="grid-2">
+        <!-- GESTION DES TOURNOIS : CHAPEAUX + CLASSEMENT FINAL + FALL GUYS -->
+        <div class="grid-2" style="margin-bottom: 1.5rem">
           <div class="card">
             <div class="card-header">
-              <h3 class="card-title">🎩 Gestion des Chapeaux (Pool 1/2/3) & Check-in</h3>
+              <h3 class="card-title">🎩 Chapeaux (Pool 1/2/3), Check-in & Classement Tournoi</h3>
               <select class="select-field" id="admin-tournament-select" style="width: auto">
                 <option value="rl_rumble">🚗 Rocket League RUMBLE (3v3)</option>
                 <option value="brawlhalla">🥊 Brawlhalla</option>
@@ -353,12 +593,15 @@
                 <option value="fall_guys">🫘 Fall Guys</option>
               </select>
             </div>
-            <div style="display: flex; gap: 0.6rem; margin-bottom: 1rem; flex-wrap: wrap">
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap">
               <button type="button" class="btn btn-primary btn-sm" id="admin-draw-teams-btn">
                 🎲 Tirer des Équipes Équilibrées
               </button>
               <button type="button" class="btn btn-secondary btn-sm" id="admin-draw-discord-btn">
                 📢 Tirer & Publier dans Discord
+              </button>
+              <button type="button" class="btn btn-emerald btn-sm" id="admin-save-placements-btn">
+                🏆 Valider les Places & Créditer les Points Live
               </button>
             </div>
             <div class="table-wrap">
@@ -369,6 +612,7 @@
                     <th>Chapeau</th>
                     <th>Check-in</th>
                     <th>Équipe</th>
+                    <th>Place Finale</th>
                   </tr>
                 </thead>
                 <tbody id="admin-pools-tbody"></tbody>
@@ -404,6 +648,74 @@
                 <tbody id="admin-fg-tbody"></tbody>
               </table>
             </div>
+          </div>
+        </div>
+
+        <!-- POINTS BONUS MANUELS & TIRAGE DE LA GRANDE TOMBOLA -->
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">🎁 Attribution Manuelle de Points / Correction (`points_ledger`)</h3>
+            </div>
+            <form id="admin-manual-points-form" style="display: flex; flex-direction: column; gap: 0.75rem">
+              <div class="grid-2">
+                <div>
+                  <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.25rem">
+                    Joueur
+                  </label>
+                  <select id="manual-pts-user" class="select-field" required></select>
+                </div>
+                <div>
+                  <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.25rem">
+                    Points (ex: 25 ou -15) & Catégorie
+                  </label>
+                  <div style="display: flex; gap: 0.4rem">
+                    <input
+                      type="number"
+                      id="manual-pts-amount"
+                      class="input-field mono"
+                      placeholder="+25"
+                      value="25"
+                      required
+                    />
+                    <select id="manual-pts-cat" class="select-field">
+                      <option value="async">Async (Semaine)</option>
+                      <option value="live">Live (Week-end)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.25rem">
+                  Motif affiché dans le journal des points (`points_ledger`)
+                </label>
+                <input
+                  type="text"
+                  id="manual-pts-label"
+                  class="input-field"
+                  placeholder="Ex: Bonus Fair-Play / Ajustement"
+                  required
+                />
+              </div>
+              <div>
+                <button type="submit" class="btn btn-primary btn-sm">⚡ Créditer dans `points_ledger`</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">🎟️ Tirage Officiel de la Grande Tombola (Dimanche 18h00)</h3>
+              <span class="badge badge-easy">Seuil ≥ 300 pts</span>
+            </div>
+            <p style="font-size: 0.86rem; color: var(--text-secondary); margin-bottom: 1rem">
+              Tire au sort en direct le gagnant de la Tombola parmi tous les joueurs ayant atteint au moins
+              <strong>300 points</strong>. Le résultat est diffusé en temps réel sur les écrans de tous les joueurs !
+            </p>
+            <button type="button" class="btn btn-primary" id="admin-draw-tombola-btn">
+              🎰 Lancer le Tirage au Sort de la Tombola en Direct
+            </button>
+            <div id="admin-tombola-winner-box" style="margin-top: 1rem"></div>
           </div>
         </div>
       </section>

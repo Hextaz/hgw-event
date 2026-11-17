@@ -1101,3 +1101,137 @@ export function getGlobalLeaderboard(db: Database.Database): any[] {
     tombola_progress_pct: Math.min(100, Math.round((r.total_points / TOMBOLA_POINTS_THRESHOLD) * 100)),
   }));
 }
+
+export interface EventLifecycleSettings {
+  event_name: string;
+  status_mode: 'auto' | 'registration' | 'live' | 'closed';
+  start_at: string;
+  tmnf_cutoff_at: string;
+  end_at: string;
+  tmnf_playit_address: string;
+  tmnf_join_url: string;
+  tmnf_server_login: string;
+  effective_phase: 'registration' | 'live' | 'closed';
+  tmnf_weekly_locked: boolean;
+}
+
+/**
+ * Récupère la configuration de l'event (dates de début/fin, phase active, serveur TMNF).
+ */
+export function getEventSettings(db: Database.Database, now: Date = new Date()): EventLifecycleSettings {
+  const rows = db.prepare(`SELECT key, value FROM event_settings`).all() as { key: string; value: string }[];
+  const map = new Map(rows.map((r) => [r.key, r.value]));
+
+  const statusMode = (map.get('status_mode') || 'auto') as 'auto' | 'registration' | 'live' | 'closed';
+  const startAt = map.get('start_at') || '2026-11-16T03:00';
+  const tmnfCutoffAt = map.get('tmnf_cutoff_at') || '2026-11-21T20:30';
+  const endAt = map.get('end_at') || '2026-11-22T18:00';
+
+  const startMs = Date.parse(startAt);
+  const cutoffMs = Date.parse(tmnfCutoffAt);
+  const endMs = Date.parse(endAt);
+  const nowMs = now.getTime();
+
+  let effectivePhase: 'registration' | 'live' | 'closed' = 'live';
+  if (statusMode === 'registration' || statusMode === 'live' || statusMode === 'closed') {
+    effectivePhase = statusMode;
+  } else {
+    if (Number.isFinite(startMs) && nowMs < startMs) {
+      effectivePhase = 'registration';
+    } else if (Number.isFinite(endMs) && nowMs >= endMs) {
+      effectivePhase = 'closed';
+    } else {
+      effectivePhase = 'live';
+    }
+  }
+
+  const tmnfWeeklyLocked =
+    effectivePhase === 'closed' || (statusMode === 'auto' && Number.isFinite(cutoffMs) && nowMs >= cutoffMs);
+
+  return {
+    event_name: map.get('event_name') || 'Hextaz Games Week (HGW)',
+    status_mode: statusMode,
+    start_at: startAt,
+    tmnf_cutoff_at: tmnfCutoffAt,
+    end_at: endAt,
+    tmnf_playit_address: map.get('tmnf_playit_address') || 'hgw-tmnf.playit.gg:2350',
+    tmnf_join_url: map.get('tmnf_join_url') || 'tmtp://#join=hgw_stadium_2026',
+    tmnf_server_login: map.get('tmnf_server_login') || 'hgw_stadium_2026',
+    effective_phase: effectivePhase,
+    tmnf_weekly_locked: tmnfWeeklyLocked,
+  };
+}
+
+/**
+ * Met à jour les paramètres de dates/phases/serveur depuis le Dashboard Admin.
+ */
+export function updateEventSettings(
+  db: Database.Database,
+  updates: Partial<{
+    event_name: string;
+    status_mode: string;
+    start_at: string;
+    tmnf_cutoff_at: string;
+    end_at: string;
+    tmnf_playit_address: string;
+    tmnf_join_url: string;
+    tmnf_server_login: string;
+    weekly_map_uid: string;
+  }>
+): EventLifecycleSettings {
+  const upsert = db.prepare(`
+    INSERT INTO event_settings (key, value, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+  `);
+
+  const allowedKeys = [
+    'event_name',
+    'status_mode',
+    'start_at',
+    'tmnf_cutoff_at',
+    'end_at',
+    'tmnf_playit_address',
+    'tmnf_join_url',
+    'tmnf_server_login',
+  ] as const;
+
+  const tx = db.transaction(() => {
+    for (const k of allowedKeys) {
+      const val = updates[k];
+      if (typeof val === 'string' && val.trim() !== '') {
+        upsert.run(k, val.trim());
+      }
+    }
+    if (typeof updates.weekly_map_uid === 'string' && updates.weekly_map_uid.trim() !== '') {
+      db.prepare(`UPDATE tmnf_maps SET uid = ? WHERE is_weekly = 1`).run(updates.weekly_map_uid.trim());
+    }
+  });
+  tx();
+
+  return getEventSettings(db);
+}
+
+/**
+ * Attribution manuelle de points bonus / ajustement par un Admin dans `points_ledger`.
+ */
+export function grantManualPoints(
+  db: Database.Database,
+  params: {
+    userId: string;
+    points: number;
+    category: 'async' | 'live';
+    label: string;
+  }
+): void {
+  const pts = Math.round(Number(params.points));
+  if (!Number.isFinite(pts) || pts === 0) {
+    throw new Error('Le montant de points doit être un entier non nul.');
+  }
+  const ref = `manual:${params.userId}:${Date.now()}`;
+  db.prepare(
+    `INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label)
+     VALUES (?, 'manual', ?, ?, ?, ?)`
+  ).run(params.userId, ref, params.category === 'live' ? 'live' : 'async', pts, params.label.trim() || 'Bonus Admin HGW');
+}
+

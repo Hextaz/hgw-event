@@ -1009,11 +1009,29 @@ export function seedDatabase(db: Database.Database): void {
       sort_order = excluded.sort_order
   `);
 
+  const insertSetting = db.prepare(`
+    INSERT INTO event_settings (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO NOTHING
+  `);
+
+  const defaultSettings: [string, string][] = [
+    ['event_name', 'Hextaz Games Week (HGW)'],
+    ['status_mode', 'auto'], // 'auto' | 'registration' | 'live' | 'closed'
+    ['start_at', '2026-11-16T03:00'],
+    ['tmnf_cutoff_at', '2026-11-21T20:30'],
+    ['end_at', '2026-11-22T18:00'],
+    ['tmnf_playit_address', process.env.TMNF_PLAYIT_ADDRESS || 'hgw-tmnf.playit.gg:2350'],
+    ['tmnf_join_url', process.env.TMNF_JOIN_URL || 'tmtp://#join=hgw_stadium_2026'],
+    ['tmnf_server_login', process.env.TMNF_SERVER_LOGIN || 'hgw_stadium_2026'],
+  ];
+
   const tx = db.transaction(() => {
     for (const g of GAMES_CATALOG) upsertGame.run(g);
     for (const q of QUESTS_CATALOG) upsertQuest.run(q);
     for (const m of TMNF_MAPS_CATALOG) upsertMap.run(m);
     for (const t of TOURNAMENTS_CATALOG) upsertTournament.run(t);
+    for (const [k, v] of defaultSettings) insertSetting.run(k, v);
   });
 
   tx();

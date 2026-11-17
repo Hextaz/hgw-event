@@ -183,6 +183,12 @@ export function initDb(customDataDir?: string): DbContext {
 
     CREATE INDEX IF NOT EXISTS idx_ledger_user ON points_ledger(user_id);
     CREATE INDEX IF NOT EXISTS idx_ledger_cat ON points_ledger(category);
+
+    CREATE TABLE IF NOT EXISTS event_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   seedDatabase(db);

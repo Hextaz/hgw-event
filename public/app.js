@@ -70,7 +70,13 @@ async function fetchState() {
 function renderAll() {
   if (!appState) return;
 
-  document.getElementById('cycle-indicator').textContent = `Cycle ${appState.dayKey} • Semaine ${appState.weekKey}`;
+  const phaseMap = {
+    registration: '⏳ Inscriptions Ouvertes',
+    live: '🟢 EN COURS (Semaine & Tournois)',
+    closed: '🏁 Événement Clôturé',
+  };
+  const phaseLabel = phaseMap[appState.eventSettings?.computed_phase] || '🟢 EN COURS';
+  document.getElementById('cycle-indicator').textContent = `${phaseLabel} • Cycle ${appState.dayKey}`;
 
   const adminTab = document.getElementById('tab-admin');
   if (appState.user?.is_admin === 1) {
@@ -647,6 +653,11 @@ function renderTrackmania() {
     document.getElementById('tmnf-join-link').href = appState.tmnfServer.joinUrl;
   }
 
+  const loginInput = document.getElementById('tmnf-login-input');
+  if (loginInput && appState.user?.tmnf_login && !loginInput.value) {
+    loginInput.value = appState.user.tmnf_login;
+  }
+
   // Top 10 Weekly
   const weeklyTbody = document.getElementById('weekly-tmnf-tbody');
   const weeklyRows = appState.weeklyTmnfLeaderboard || [];
@@ -974,6 +985,63 @@ function revealNextStreamSlot() {
 }
 
 function renderAdmin() {
+  // 1. KPIs Admin
+  const stats = appState.admin?.stats;
+  const kpisGrid = document.getElementById('admin-kpis-grid');
+  if (kpisGrid && stats) {
+    const items = [
+      { label: 'Joueurs Inscrits', val: stats.totalPlayers, color: 'var(--text-primary)' },
+      { label: 'Preuves en Attente', val: stats.pendingProofsCount, color: stats.pendingProofsCount > 0 ? 'var(--accent-gold)' : 'var(--accent-emerald)' },
+      { label: 'Défis Validés', val: stats.validatedQuestsCount, color: 'var(--accent-emerald)' },
+      { label: 'Replays .gbx Validés', val: stats.totalGbxSubmissions, color: 'var(--accent-sky)' },
+      { label: 'Points Distribués', val: `${stats.totalPointsDistributed} pts`, color: 'var(--accent-gold)' },
+      { label: 'Qualifiés Tombola (≥300)', val: stats.tombolaQualifiedCount, color: 'var(--accent-emerald)' },
+    ];
+    kpisGrid.innerHTML = items
+      .map(
+        (k) => `
+        <div class="card" style="padding:0.9rem 1rem;">
+          <div style="font-size:0.72rem;text-transform:uppercase;color:var(--text-muted);font-weight:700;">${k.label}</div>
+          <div class="mono" style="font-size:1.35rem;font-weight:700;color:${k.color};margin-top:0.2rem;">${k.val}</div>
+        </div>
+      `
+      )
+      .join('');
+  }
+
+  // 2. Paramètres Dates & Phase de la HGW
+  const cfg = appState.eventSettings;
+  if (cfg) {
+    const badgeEl = document.getElementById('admin-phase-badge');
+    if (badgeEl) {
+      const mapBadge = {
+        registration: { text: '⏳ Phase : Inscriptions', cls: 'badge-medium' },
+        live: { text: '🟢 Phase : EN COURS (Live)', cls: 'badge-easy' },
+        closed: { text: '🏁 Phase : Clôturée', cls: 'badge-hard' },
+      };
+      const b = mapBadge[cfg.computed_phase] || mapBadge.live;
+      badgeEl.className = `badge ${b.cls}`;
+      badgeEl.textContent = b.text;
+    }
+
+    const toLocalInput = (iso) => (iso ? String(iso).slice(0, 16) : '');
+    const modeInput = document.getElementById('cfg-status-mode');
+    const startInput = document.getElementById('cfg-start-at');
+    const cutoffInput = document.getElementById('cfg-tmnf-cutoff-at');
+    const endInput = document.getElementById('cfg-end-at');
+    const playitInput = document.getElementById('cfg-playit-addr');
+    const weeklyMapObj = (appState.tmnfMaps || []).find((m) => m.is_weekly);
+    const weeklyUidInput = document.getElementById('cfg-weekly-uid');
+
+    if (modeInput) modeInput.value = cfg.status_mode || 'auto';
+    if (startInput) startInput.value = toLocalInput(cfg.start_at);
+    if (cutoffInput) cutoffInput.value = toLocalInput(cfg.tmnf_cutoff_at);
+    if (endInput) endInput.value = toLocalInput(cfg.end_at);
+    if (playitInput) playitInput.value = cfg.tmnf_playit_address || '';
+    if (weeklyUidInput && weeklyMapObj) weeklyUidInput.value = weeklyMapObj.uid || '';
+  }
+
+  // 3. File de Modération #preuves
   const proofsList = document.getElementById('admin-proofs-list');
   const pending = appState.admin?.pendingProofs || [];
 
@@ -1051,6 +1119,7 @@ function renderAdmin() {
     });
   }
 
+  // 4. Tournois : Chapeaux, Check-in, Équipes & Classement Final
   const selectEl = document.getElementById('admin-tournament-select');
   const selectedTourneyId = selectEl.value || 'rl_rumble';
   const tourney = (appState.tournaments || []).find((t) => t.id === selectedTourneyId);
@@ -1074,6 +1143,16 @@ function renderAdmin() {
           </td>
           <td class="mono" style="font-size:0.8rem;color:var(--accent-gold);">
             ${r.team_name ? escapeHtml(r.team_name) : '—'}
+          </td>
+          <td>
+            <select class="select-field admin-placement-select" data-uid="${r.user_id}" style="padding:0.25rem 0.45rem;font-size:0.78rem;">
+              <option value="">—</option>
+              <option value="1" ${r.placement === 1 ? 'selected' : ''}>🥇 1er</option>
+              <option value="2" ${r.placement === 2 ? 'selected' : ''}>🥈 2e</option>
+              <option value="3" ${r.placement === 3 ? 'selected' : ''}>🥉 3e-4e</option>
+              <option value="5" ${r.placement === 5 ? 'selected' : ''}>🏅 5e-8e</option>
+              <option value="9" ${r.placement === 9 ? 'selected' : ''}>🎮 Participation</option>
+            </select>
           </td>
         </tr>
       `
@@ -1103,6 +1182,7 @@ function renderAdmin() {
     });
   }
 
+  // 5. Fall Guys 5 Shows
   const fgTourney = (appState.tournaments || []).find((t) => t.id === 'fall_guys');
   const fgTbody = document.getElementById('admin-fg-tbody');
   if (fgTourney) {
@@ -1133,6 +1213,17 @@ function renderAdmin() {
         `;
       })
       .join('');
+  }
+
+  // 6. Liste des joueurs pour attribution manuelle de points
+  const manualUserSelect = document.getElementById('manual-pts-user');
+  const allUsers = appState.admin?.allUsers || [];
+  if (manualUserSelect && allUsers.length > 0) {
+    const currentVal = manualUserSelect.value;
+    manualUserSelect.innerHTML = allUsers
+      .map((u) => `<option value="${u.id}">${escapeHtml(u.display_name)} (@${escapeHtml(u.username)})</option>`)
+      .join('');
+    if (currentVal) manualUserSelect.value = currentVal;
   }
 }
 
@@ -1199,6 +1290,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     navigator.clipboard?.writeText(addr);
     showToast(`📋 Adresse copiée : ${addr}`);
   });
+
+  const copyReplaysPath = () => {
+    const pathStr = '%USERPROFILE%\\Documents\\TrackMania\\Tracks\\Replays\\Replays';
+    navigator.clipboard?.writeText(pathStr);
+    showToast(`📂 Chemin Windows copié ! Colle-le (Ctrl+V) dans la fenêtre d'upload.`);
+  };
+  document.getElementById('copy-replays-path-btn')?.addEventListener('click', copyReplaysPath);
+  document.getElementById('guide-copy-path-btn')?.addEventListener('click', copyReplaysPath);
+  document.getElementById('open-guide-from-tm-btn')?.addEventListener('click', () => switchView('guide'));
 
   // Sauvegarde des jeux
   document.getElementById('save-games-btn').addEventListener('click', async () => {
@@ -1371,6 +1471,27 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Événements Admin
+  document.getElementById('admin-settings-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      status_mode: document.getElementById('cfg-status-mode').value,
+      start_at: document.getElementById('cfg-start-at').value,
+      tmnf_cutoff_at: document.getElementById('cfg-tmnf-cutoff-at').value,
+      end_at: document.getElementById('cfg-end-at').value,
+      tmnf_playit_address: document.getElementById('cfg-playit-addr').value.trim(),
+      weekly_map_uid: document.getElementById('cfg-weekly-uid').value.trim(),
+    };
+    const res = await fetch('/api/admin/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      showToast('📅 Dates et paramètres de la HGW mis à jour en temps réel !');
+      await fetchState();
+    }
+  });
+
   document.getElementById('admin-tournament-select').addEventListener('change', () => renderAdmin());
 
   document.getElementById('admin-draw-teams-btn').addEventListener('click', async () => {
@@ -1405,6 +1526,30 @@ window.addEventListener('DOMContentLoaded', async () => {
     await fetchState();
   });
 
+  document.getElementById('admin-save-placements-btn')?.addEventListener('click', async () => {
+    const tid = document.getElementById('admin-tournament-select').value;
+    const selects = document.querySelectorAll('#admin-pools-tbody .admin-placement-select');
+    const placements = [];
+    selects.forEach((sel) => {
+      if (sel.value) {
+        placements.push({ userId: sel.dataset.uid, placement: Number(sel.value) });
+      }
+    });
+    if (placements.length === 0) {
+      showToast('⚠️ Sélectionne au moins une place finale dans le tableau avant de valider.');
+      return;
+    }
+    const res = await fetch(`/api/admin/tournaments/${tid}/placements`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ placements }),
+    });
+    if (res.ok) {
+      showToast('🏆 Classement du tournoi enregistré et points Live crédités !');
+      await fetchState();
+    }
+  });
+
   document.getElementById('admin-save-fg-btn').addEventListener('click', async () => {
     const rows = document.querySelectorAll('#admin-fg-tbody tr[data-fg-uid]');
     const scores = Array.from(rows).map((tr) => {
@@ -1422,6 +1567,47 @@ window.addEventListener('DOMContentLoaded', async () => {
       showToast('🫘 Cumul des 5 parties Fall Guys calculé et points HGW attribués !');
       await fetchState();
     }
+  });
+
+  document.getElementById('admin-manual-points-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      userId: document.getElementById('manual-pts-user').value,
+      category: document.getElementById('manual-pts-category').value,
+      points: Number(document.getElementById('manual-pts-amount').value),
+      label: document.getElementById('manual-pts-label').value.trim(),
+    };
+    const res = await fetch('/api/admin/manual-points', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      document.getElementById('manual-pts-amount').value = '';
+      document.getElementById('manual-pts-label').value = '';
+      showToast('🎁 Points bonus/ajustement crédités en direct !');
+      await fetchState();
+    }
+  });
+
+  document.getElementById('admin-draw-tombola-btn')?.addEventListener('click', async () => {
+    const res = await fetch('/api/admin/tombola/draw', { method: 'POST' });
+    const data = await res.json();
+    const box = document.getElementById('admin-tombola-winner-box');
+    if (!res.ok) {
+      showToast(`❌ ${data.error}`);
+      return;
+    }
+    if (box) {
+      box.style.display = 'block';
+      box.innerHTML = `
+        🎉 <strong>GAGNANT TIRÉ AU SORT (${data.eligibleCount} qualifiés ≥ 300 pts) :</strong>
+        <div style="font-family:var(--font-display);font-size:1.35rem;color:var(--accent-gold);margin-top:0.2rem;">
+          🎟️ ${escapeHtml(data.winner.display_name)} (${data.winner.total_points} pts)
+        </div>
+      `;
+    }
+    showToast(`🎟️ Gagnant Tombola : ${data.winner.display_name} !`);
   });
 
   document.getElementById('admin-seed-demo-btn').addEventListener('click', async () => {

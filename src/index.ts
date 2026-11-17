@@ -12,8 +12,10 @@ import { initDb } from './db.js';
 import {
   drawDailyQuestsForUser,
   generateBalancedTeams,
+  getEventSettings,
   getGlobalLeaderboard,
   getParisDayAndWeekKey,
+  grantManualPoints,
   recalculateWeeklyTmnfLeaderboard,
   recordTmnfLiveServerFinish,
   recordTournamentPlacements,
@@ -24,6 +26,7 @@ import {
   submitDailyProof,
   submitTmnfReplay,
   TOMBOLA_POINTS_THRESHOLD,
+  updateEventSettings,
   updateFallGuysScoresAndRankings,
 } from './engine.js';
 import { buildSampleReplayGbx, formatTmTime } from './gbx.js';
@@ -401,8 +404,11 @@ app.get('/api/state', (req: AuthedRequest, res) => {
     canRerollToday = !(req.user.reroll_day_key === dayKey && req.user.rerolls_used >= 1);
   }
 
+  const eventSettings = getEventSettings(db);
+
   let pendingProofs: any[] = [];
   let allUsers: any[] = [];
+  let stats: any = null;
   if (req.user?.is_admin === 1) {
     pendingProofs = db
       .prepare(
@@ -417,19 +423,37 @@ app.get('/api/state', (req: AuthedRequest, res) => {
       .all();
 
     allUsers = db.prepare(`SELECT id, username, display_name, tmnf_login, is_admin FROM users ORDER BY display_name ASC`).all();
+
+    const totalReplays = (db.prepare(`SELECT COUNT(*) AS cnt FROM tmnf_submissions`).get() as { cnt: number }).cnt;
+    const totalValidatedQuests = (
+      db.prepare(`SELECT COUNT(*) AS cnt FROM daily_assignments WHERE status = 'validated'`).get() as { cnt: number }
+    ).cnt;
+    const totalPoints = (
+      db.prepare(`SELECT COALESCE(SUM(points), 0) AS tot FROM points_ledger`).get() as { tot: number }
+    ).tot;
+
+    stats = {
+      totalUsers: allUsers.length,
+      pendingProofsCount: pendingProofs.length,
+      totalReplays,
+      totalValidatedQuests,
+      totalPoints,
+      tombolaQualifiedCount: leaderboard.filter((p) => p.tombola_eligible).length,
+    };
   }
 
   res.json({
     serverTime: new Date().toISOString(),
     dayKey,
     weekKey,
+    eventSettings,
     oauthConfigured: Boolean(process.env.DISCORD_CLIENT_ID?.trim()),
     allowDevLogin: process.env.ALLOW_DEV_LOGIN === 'true' || !process.env.DISCORD_CLIENT_ID?.trim(),
     botStatus: bot.getStatus(),
     tmnfServer: {
-      login: process.env.TMNF_SERVER_LOGIN || 'hgw_stadium_2026',
-      playitAddress: process.env.TMNF_PLAYIT_ADDRESS || 'hgw-tmnf.playit.gg:2350',
-      joinUrl: process.env.TMNF_JOIN_URL || 'tmtp://#join=hgw_stadium_2026',
+      login: eventSettings.tmnf_server_login,
+      playitAddress: eventSettings.tmnf_playit_address,
+      joinUrl: eventSettings.tmnf_join_url,
     },
     tombolaThreshold: TOMBOLA_POINTS_THRESHOLD,
     user: req.user || null,
@@ -445,7 +469,7 @@ app.get('/api/state', (req: AuthedRequest, res) => {
     weeklyTmnfLeaderboard: weeklyTmnf,
     tournaments: tournamentsWithRegs,
     leaderboard,
-    admin: req.user?.is_admin === 1 ? { pendingProofs, allUsers } : null,
+    admin: req.user?.is_admin === 1 ? { pendingProofs, allUsers, stats } : null,
   });
 });
 
@@ -800,6 +824,48 @@ app.post('/api/admin/cron/trigger', requireAdmin, (_req: AuthedRequest, res) => 
   const result = runNightlyDailyReset(db);
   broadcastRealtimeEvent('daily_reset', '⏰ Nouveaux défis quotidiens générés !');
   res.json({ ok: true, ...result });
+});
+
+app.post('/api/admin/settings', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const updated = updateEventSettings(db, req.body || {});
+    broadcastRealtimeEvent('settings_updated', '⚙️ Paramètres et dates de la HGW mis à jour !');
+    res.json({ ok: true, eventSettings: updated });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/manual-points', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const { userId, points, category, label } = req.body;
+    grantManualPoints(db, {
+      userId: String(userId || ''),
+      points: Number(points),
+      category: category === 'live' ? 'live' : 'async',
+      label: String(label || 'Bonus Admin HGW'),
+    });
+    broadcastRealtimeEvent('points_updated', `🎁 Points bonus attribués (${points > 0 ? `+${points}` : points} pts) !`);
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/tombola/draw', requireAdmin, (_req: AuthedRequest, res) => {
+  const lb = getGlobalLeaderboard(db);
+  const qualified = lb.filter((p) => p.tombola_eligible);
+  if (qualified.length === 0) {
+    res.status(400).json({ error: 'Aucun joueur n’a encore atteint le seuil de 300 pts pour la Tombola.' });
+    return;
+  }
+  const winner = qualified[Math.floor(Math.random() * qualified.length)];
+  broadcastRealtimeEvent(
+    'tombola_winner',
+    `🎟️ TIRAGE TOMBOLA HGW : Félicitations à ${winner.display_name} (${winner.total_points} pts) qui remporte la Grande Tombola !`,
+    { winner, candidates: qualified }
+  );
+  res.json({ ok: true, winner, candidates: qualified });
 });
 
 // Seeder de démonstration en 1 clic pour peupler 12 joueurs, des médailles TMNF, des équipes RL Chapeaux et des preuves
