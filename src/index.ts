@@ -67,7 +67,15 @@ app.use(cookieParser());
 // Fichiers statiques et preuves
 const publicDir = path.resolve(__dirname, '../public');
 app.use('/uploads/proofs', express.static(proofsDir));
-app.use(express.static(publicDir));
+app.use(
+  express.static(publicDir, {
+    etag: false,
+    lastModified: false,
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    },
+  })
+);
 
 // Signatures HMAC de session (sans dépendance externe lourde)
 function signSessionToken(userId: string): string {
