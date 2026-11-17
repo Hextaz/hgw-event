@@ -618,9 +618,20 @@ export function submitTmnfReplay(
     throw new Error('Ce fichier .Replay.gbx exact a déjà été soumis (partage ou doublon interdit).');
   }
 
-  // Anti-triche #2 : Cohérence du login TMNF du joueur
+  // Anti-triche #2 : Cohérence et unicité du login TMNF du joueur
   const user = db.prepare(`SELECT id, tmnf_login, display_name FROM users WHERE id = ?`).get(params.userId) as any;
   if (!user) throw new Error('Utilisateur introuvable.');
+
+  if (parsed.playerLogin && parsed.playerLogin !== 'unknown_driver') {
+    const otherOwner = db
+      .prepare(`SELECT id, display_name FROM users WHERE LOWER(tmnf_login) = LOWER(?) AND id != ?`)
+      .get(parsed.playerLogin, params.userId) as { id: string; display_name: string } | undefined;
+    if (otherOwner) {
+      throw new Error(
+        `Anti-Triche : Le compte Trackmania "${parsed.playerLogin}" appartient déjà au joueur "${otherOwner.display_name}". Partage de replay interdit.`
+      );
+    }
+  }
 
   if (user.tmnf_login && user.tmnf_login.toLowerCase() !== parsed.playerLogin!.toLowerCase()) {
     throw new Error(
@@ -641,6 +652,14 @@ export function submitTmnfReplay(
     throw new Error(
       `L'UID de la map du replay ("${parsed.mapUid}") ne correspond à aucune des 8 maps Médailles ni à la Map Hebdo HGW.`
     );
+  }
+
+  const lifecycle = getEventSettings(db);
+  if (lifecycle.effective_phase === 'closed') {
+    throw new Error('La Hextaz Games Week est clôturée : les dépôts de replays sont fermés.');
+  }
+  if (map.is_weekly && lifecycle.tmnf_weekly_locked) {
+    throw new Error('Le Chrono Hebdomadaire TMNF est clôturé (cutoff Samedi 20h30 avant la Cup Live).');
   }
 
   const timeMs = parsed.bestTimeMs;
@@ -1234,4 +1253,91 @@ export function grantManualPoints(
      VALUES (?, 'manual', ?, ?, ?, ?)`
   ).run(params.userId, ref, params.category === 'live' ? 'live' : 'async', pts, params.label.trim() || 'Bonus Admin HGW');
 }
+
+/**
+ * Récupère le classement complet d'une piste Trackmania (Chasse aux Médailles ou Map Hebdo)
+ * avec l'écart au WR Discord et le lien vers le Ghost `.Replay.gbx`.
+ */
+export function getMapLeaderboard(
+  db: Database.Database,
+  mapId: string
+): {
+  map: any;
+  entries: {
+    rank: number;
+    user_id: string;
+    display_name: string;
+    tmnf_login: string | null;
+    best_time_ms: number;
+    formatted_time: string;
+    medal: 'author' | 'gold' | 'silver' | 'bronze' | 'none';
+    points: number;
+    delta_wr_ms: number;
+    file_name: string | null;
+  }[];
+} {
+  const map = db.prepare(`SELECT * FROM tmnf_maps WHERE id = ?`).get(mapId) as any;
+  if (!map) {
+    throw new Error('Piste Trackmania introuvable.');
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT
+         ts.user_id,
+         u.display_name,
+         u.tmnf_login,
+         MIN(ts.time_ms) AS best_time_ms,
+         MAX(ts.points_awarded) AS best_points,
+         (
+           SELECT ts2.file_name
+           FROM tmnf_submissions ts2
+           WHERE ts2.user_id = ts.user_id AND ts2.map_id = ts.map_id
+           ORDER BY ts2.time_ms ASC, ts2.id ASC
+           LIMIT 1
+         ) AS best_file_name
+       FROM tmnf_submissions ts
+       JOIN users u ON u.id = ts.user_id
+       WHERE ts.map_id = ?
+       GROUP BY ts.user_id
+       ORDER BY best_time_ms ASC`
+    )
+    .all(mapId) as any[];
+
+  const wrMs = rows.length > 0 ? rows[0].best_time_ms : map.author_ms;
+
+  const entries = rows.map((r, idx) => {
+    const ms = r.best_time_ms;
+    let medal: 'author' | 'gold' | 'silver' | 'bronze' | 'none' = 'none';
+    if (ms <= map.author_ms) medal = 'author';
+    else if (ms <= map.gold_ms) medal = 'gold';
+    else if (ms <= map.silver_ms) medal = 'silver';
+    else if (ms <= map.bronze_ms) medal = 'bronze';
+
+    return {
+      rank: idx + 1,
+      user_id: r.user_id,
+      display_name: r.display_name,
+      tmnf_login: r.tmnf_login || null,
+      best_time_ms: ms,
+      formatted_time: formatTmTime(ms),
+      medal,
+      points: r.best_points || 0,
+      delta_wr_ms: ms - wrMs,
+      file_name: r.best_file_name || null,
+    };
+  });
+
+  return {
+    map: {
+      ...map,
+      author_formatted: formatTmTime(map.author_ms),
+      gold_formatted: formatTmTime(map.gold_ms),
+      silver_formatted: formatTmTime(map.silver_ms),
+      bronze_formatted: formatTmTime(map.bronze_ms),
+    },
+    entries,
+  };
+}
+
 

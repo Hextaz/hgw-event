@@ -14,6 +14,7 @@ import {
   generateBalancedTeams,
   getEventSettings,
   getGlobalLeaderboard,
+  getMapLeaderboard,
   getParisDayAndWeekKey,
   grantManualPoints,
   recalculateWeeklyTmnfLeaderboard,
@@ -127,6 +128,49 @@ function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction): vo
 }
 
 app.use(attachUser);
+
+// Rate-limiter léger en mémoire pour protéger les routes d'upload contre le spam
+const rateBuckets = new Map<string, number[]>();
+function createRateLimiter(maxRequests: number, windowMs: number) {
+  return (req: AuthedRequest, res: Response, next: NextFunction): void => {
+    const key = `${req.user?.id || req.ip}:${req.baseUrl}${req.path}`;
+    const now = Date.now();
+    const recent = (rateBuckets.get(key) || []).filter((ts) => now - ts < windowMs);
+    if (recent.length >= maxRequests) {
+      res.status(429).json({ error: 'Trop de requêtes rapprochées. Patiente quelques secondes avant de réessayer.' });
+      return;
+    }
+    recent.push(now);
+    rateBuckets.set(key, recent);
+    next();
+  };
+}
+
+// Vérifie les magic bytes d'une preuve uploadée (PNG, JPEG, GIF, WEBP, MP4, WEBM)
+function isValidMediaMagicBytes(filePath: string): boolean {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const head = Buffer.alloc(16);
+    const bytesRead = fs.readSync(fd, head, 0, 16, 0);
+    fs.closeSync(fd);
+    if (bytesRead < 4) return false;
+    // PNG: 89 50 4E 47
+    if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return true;
+    // JPEG: FF D8 FF
+    if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return true;
+    // GIF: 47 49 46 38
+    if (head.subarray(0, 4).toString('ascii') === 'GIF8') return true;
+    // WEBP: RIFF....WEBP
+    if (head.subarray(0, 4).toString('ascii') === 'RIFF' && head.subarray(8, 12).toString('ascii') === 'WEBP') return true;
+    // MP4 / MOV: ....ftyp
+    if (head.subarray(4, 8).toString('ascii') === 'ftyp') return true;
+    // WEBM / MKV: 1A 45 DF A3
+    if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 // Multer pour upload de preuves (images <= 10 Mo, vidéos courtes <= 20 Mo)
 const proofUpload = multer({
@@ -577,71 +621,215 @@ app.post('/api/quests/:id/reroll', requireAuth, (req: AuthedRequest, res) => {
   }
 });
 
-// Soumission d'une preuve (upload fichier ou lien)
-app.post('/api/quests/:id/submit', requireAuth, proofUpload.single('proofFile'), async (req: AuthedRequest, res) => {
-  try {
-    const assignmentId = Number.parseInt(String(req.params.id), 10);
-    const proofUrl = typeof req.body.proofUrl === 'string' ? req.body.proofUrl.trim() : '';
-    const proofNote = typeof req.body.proofNote === 'string' ? req.body.proofNote.trim() : '';
-    const proofFile = req.file?.filename;
+// Soumission d'une preuve (upload fichier ou lien) avec Rate-Limit & Validation Magic Bytes
+app.post(
+  '/api/quests/:id/submit',
+  requireAuth,
+  createRateLimiter(20, 60_000),
+  proofUpload.single('proofFile'),
+  async (req: AuthedRequest, res) => {
+    try {
+      const assignmentId = Number.parseInt(String(req.params.id), 10);
+      const proofUrl = typeof req.body.proofUrl === 'string' ? req.body.proofUrl.trim() : '';
+      const proofNote = typeof req.body.proofNote === 'string' ? req.body.proofNote.trim() : '';
+      const proofFile = req.file?.filename;
 
-    const updated = submitDailyProof(db, {
-      userId: req.user.id,
-      assignmentId,
-      proofUrl: proofUrl || undefined,
-      proofFile,
-      proofNote: proofNote || undefined,
-    });
+      if (proofFile && req.file?.path) {
+        if (!isValidMediaMagicBytes(req.file.path)) {
+          try {
+            fs.unlinkSync(req.file.path);
+          } catch {
+            // ignore unlink error
+          }
+          res.status(400).json({
+            error: 'Format de fichier non reconnu : veuillez envoyer une vraie image (PNG, JPG, WEBP, GIF) ou vidéo (MP4, WEBM).',
+          });
+          return;
+        }
+      }
 
-    await bot.notifyProofSubmitted(updated);
-    broadcastRealtimeEvent('proof_submitted', `🕵️ ${req.user.display_name} a soumis une preuve sur ${updated.game_name}`);
-    res.json({ ok: true, assignment: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Échec de l’envoi de la preuve.' });
+      const updated = submitDailyProof(db, {
+        userId: req.user.id,
+        assignmentId,
+        proofUrl: proofUrl || undefined,
+        proofFile,
+        proofNote: proofNote || undefined,
+      });
+
+      await bot.notifyProofSubmitted(updated);
+      broadcastRealtimeEvent('proof_submitted', `🕵️ ${req.user.display_name} a soumis une preuve sur ${updated.game_name}`);
+      res.json({ ok: true, assignment: updated });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Échec de l’envoi de la preuve.' });
+    }
   }
-});
+);
 
 // ============================================================================
-// TRACKMANIA (.Replay.gbx) UPLOAD + WEBHOOK TEMPS RÉEL SERVEUR DÉDIÉ
+// TRACKMANIA (.Replay.gbx) UPLOAD SIMPLE + BATCH + CLASSEMENT PISTE + GHOST WR
 // ============================================================================
 
-app.post('/api/tmnf/submit-replay', requireAuth, gbxUpload.single('replay'), (req: AuthedRequest, res) => {
-  try {
-    if (!req.file || !req.file.buffer) {
-      res.status(400).json({ error: 'Veuillez sélectionner un fichier .Replay.gbx.' });
+app.post(
+  '/api/tmnf/submit-replay',
+  requireAuth,
+  createRateLimiter(25, 60_000),
+  gbxUpload.single('replay'),
+  (req: AuthedRequest, res) => {
+    try {
+      if (!req.file || !req.file.buffer) {
+        res.status(400).json({ error: 'Veuillez sélectionner un fichier .Replay.gbx.' });
+        return;
+      }
+
+      const explicitMapId = typeof req.body.mapId === 'string' ? req.body.mapId : undefined;
+      const safeReplayName = `${Date.now()}_${req.user.id}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
+
+      const result = submitTmnfReplay(db, {
+        userId: req.user.id,
+        buffer: req.file.buffer,
+        fileName: safeReplayName,
+        explicitMapId,
+      });
+
+      fs.writeFileSync(path.join(replaysDir, safeReplayName), req.file.buffer);
+
+      broadcastRealtimeEvent(
+        'tmnf_replay',
+        `🏎️ ${req.user.display_name} a signé ${result.parsed.formattedTime} sur ${result.map.code}${result.deltaPoints > 0 ? ` (+${result.deltaPoints} pts)` : ''}`
+      );
+
+      res.json({
+        ok: true,
+        mapName: result.map.name,
+        mapCode: result.map.code,
+        isWeekly: Boolean(result.map.is_weekly),
+        formattedTime: result.parsed.formattedTime,
+        medal: result.medal,
+        previousPoints: result.previousPoints,
+        newPoints: result.newPoints,
+        deltaPoints: result.deltaPoints,
+        isPersonalBest: result.isPersonalBest,
+      });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Erreur lors de la lecture du fichier .Replay.gbx.' });
+    }
+  }
+);
+
+// Upload par lot (Batch Drag & Drop jusqu'à 12 fichiers .Replay.gbx d'un seul coup)
+app.post(
+  '/api/tmnf/submit-replays-batch',
+  requireAuth,
+  createRateLimiter(15, 60_000),
+  gbxUpload.array('replays', 12),
+  (req: AuthedRequest, res) => {
+    const files = (req.files as Express.Multer.File[]) || [];
+    if (files.length === 0) {
+      res.status(400).json({ error: 'Veuillez sélectionner au moins un fichier .Replay.gbx.' });
       return;
     }
 
-    const explicitMapId = typeof req.body.mapId === 'string' ? req.body.mapId : undefined;
-    const result = submitTmnfReplay(db, {
-      userId: req.user.id,
-      buffer: req.file.buffer,
-      fileName: req.file.originalname,
-      explicitMapId,
-    });
+    const results: any[] = [];
+    let totalDeltaPoints = 0;
+    let validCount = 0;
+    let errorCount = 0;
 
-    const safeReplayName = `${Date.now()}_${req.user.id}_${result.map.code}.Replay.gbx`;
-    fs.writeFileSync(path.join(replaysDir, safeReplayName), req.file.buffer);
+    for (const file of files) {
+      try {
+        const safeReplayName = `${Date.now()}_${req.user.id}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
+        const out = submitTmnfReplay(db, {
+          userId: req.user.id,
+          buffer: file.buffer,
+          fileName: safeReplayName,
+        });
+        fs.writeFileSync(path.join(replaysDir, safeReplayName), file.buffer);
+        validCount++;
+        totalDeltaPoints += out.deltaPoints;
+        results.push({
+          fileName: file.originalname,
+          ok: true,
+          mapCode: out.map.code,
+          mapName: out.map.name,
+          formattedTime: out.parsed.formattedTime,
+          medal: out.medal,
+          deltaPoints: out.deltaPoints,
+          isPersonalBest: out.isPersonalBest,
+        });
+      } catch (err: any) {
+        errorCount++;
+        results.push({
+          fileName: file.originalname,
+          ok: false,
+          error: err.message || 'Fichier .gbx invalide.',
+        });
+      }
+    }
 
-    broadcastRealtimeEvent(
-      'tmnf_replay',
-      `🏎️ ${req.user.display_name} a signé ${result.parsed.formattedTime} sur ${result.map.code}${result.deltaPoints > 0 ? ` (+${result.deltaPoints} pts)` : ''}`
-    );
+    if (validCount > 0) {
+      broadcastRealtimeEvent(
+        'tmnf_replay',
+        `🏎️ ${req.user.display_name} a validé ${validCount} replay(s) Trackmania${totalDeltaPoints > 0 ? ` (+${totalDeltaPoints} pts)` : ''} !`
+      );
+    }
 
     res.json({
-      ok: true,
-      mapName: result.map.name,
-      mapCode: result.map.code,
-      isWeekly: Boolean(result.map.is_weekly),
-      formattedTime: result.parsed.formattedTime,
-      medal: result.medal,
-      previousPoints: result.previousPoints,
-      newPoints: result.newPoints,
-      deltaPoints: result.deltaPoints,
-      isPersonalBest: result.isPersonalBest,
+      ok: validCount > 0,
+      validCount,
+      errorCount,
+      totalDeltaPoints,
+      results,
     });
+  }
+);
+
+// Classement complet d'une piste Trackmania (Chasse aux Médailles ou Map Hebdo)
+app.get('/api/tmnf/map/:mapId/leaderboard', (req, res) => {
+  try {
+    const data = getMapLeaderboard(db, String(req.params.mapId));
+    res.json({ ok: true, ...data });
   } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Erreur lors de la lecture du fichier .Replay.gbx.' });
+    res.status(404).json({ error: err.message || 'Piste introuvable.' });
+  }
+});
+
+// Téléchargement du Ghost (.Replay.gbx) du WR Discord ou d'un joueur spécifique sur une piste
+app.get('/api/tmnf/map/:mapId/ghost/:userId', (req, res) => {
+  try {
+    const mapId = String(req.params.mapId);
+    const userId = String(req.params.userId);
+    const data = getMapLeaderboard(db, mapId);
+    const entry = data.entries.find((e) => e.user_id === userId) || data.entries[0];
+    if (!entry) {
+      res.status(404).json({ error: 'Aucun temps enregistré sur cette piste.' });
+      return;
+    }
+
+    const downloadName = `Ghost_${data.map.code}_${entry.display_name.replace(/[^a-zA-Z0-9_-]/g, '')}_${entry.best_time_ms}ms.Replay.gbx`;
+
+    if (entry.file_name) {
+      const diskPath = path.join(replaysDir, path.basename(entry.file_name));
+      if (fs.existsSync(diskPath)) {
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+        res.send(fs.readFileSync(diskPath));
+        return;
+      }
+    }
+
+    // Fallback synthétique avec le temps exact du joueur si le replay initial venait du seeder ou XML-RPC
+    const buf = buildSampleReplayGbx({
+      mapUid: data.map.uid,
+      bestTimeMs: entry.best_time_ms,
+      playerLogin: entry.tmnf_login || entry.display_name.toLowerCase(),
+      playerNickname: entry.display_name,
+      nonce: `ghost_${mapId}_${entry.user_id}`,
+    });
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+    res.send(buf);
+  } catch (err: any) {
+    res.status(404).json({ error: err.message || 'Ghost introuvable.' });
   }
 });
 
@@ -740,7 +928,7 @@ app.post('/api/tournaments/:id/toggle', requireAuth, (req: AuthedRequest, res) =
 });
 
 // ============================================================================
-// BACK-OFFICE ADMIN (VALIDATION PREUVES, CHAPEAUX, TIRAGE LIVE, SIMULATION)
+// BACK-OFFICE ADMIN (VALIDATION PREUVES, CHAPEAUX, TIRAGE LIVE, BACKUP, TOMBOLA)
 // ============================================================================
 
 app.post('/api/admin/proofs/:id/review', requireAdmin, (req: AuthedRequest, res) => {
@@ -867,13 +1055,52 @@ app.post('/api/admin/tombola/draw', requireAdmin, (_req: AuthedRequest, res) => 
     res.status(400).json({ error: 'Aucun joueur n’a encore atteint le seuil de 300 pts pour la Tombola.' });
     return;
   }
-  const winner = qualified[Math.floor(Math.random() * qualified.length)];
+  const idx = crypto.randomInt(0, qualified.length);
+  const winner = qualified[idx];
   broadcastRealtimeEvent(
     'tombola_winner',
     `🎟️ TIRAGE TOMBOLA HGW : Félicitations à ${winner.display_name} (${winner.total_points} pts) qui remporte la Grande Tombola !`,
-    { winner, candidates: qualified }
+    { winner, candidates: qualified, eligibleCount: qualified.length }
   );
-  res.json({ ok: true, winner, candidates: qualified });
+  res.json({ ok: true, winner, candidates: qualified, eligibleCount: qualified.length });
+});
+
+// Sauvegarde à chaud de la base SQLite (.sqlite) sans interrompre le serveur
+app.get('/api/admin/backup/sqlite', requireAdmin, async (_req: AuthedRequest, res) => {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const tmpBackupPath = path.join(replaysDir, `hgw-backup-${stamp}.sqlite`);
+    await db.backup(tmpBackupPath);
+    const fileBuf = fs.readFileSync(tmpBackupPath);
+    try {
+      fs.unlinkSync(tmpBackupPath);
+    } catch {
+      // ignore unlink error
+    }
+    res.setHeader('Content-Type', 'application/x-sqlite3');
+    res.setHeader('Content-Disposition', `attachment; filename="hgw-backup-${stamp.slice(0, 10)}.sqlite"`);
+    res.send(fileBuf);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Erreur lors de la sauvegarde SQLite.' });
+  }
+});
+
+// Export JSON intégral (audit / archivage de l'event)
+app.get('/api/admin/backup/json', requireAdmin, (_req: AuthedRequest, res) => {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    eventSettings: getEventSettings(db),
+    leaderboard: getGlobalLeaderboard(db),
+    users: db.prepare(`SELECT * FROM users`).all(),
+    pointsLedger: db.prepare(`SELECT * FROM points_ledger ORDER BY id ASC`).all(),
+    tmnfSubmissions: db.prepare(`SELECT * FROM tmnf_submissions ORDER BY id ASC`).all(),
+    tournamentRegistrations: db.prepare(`SELECT * FROM tournament_registrations`).all(),
+    dailyAssignments: db.prepare(`SELECT * FROM daily_assignments ORDER BY id ASC`).all(),
+  };
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="hgw-export-${stamp}.json"`);
+  res.send(JSON.stringify(payload, null, 2));
 });
 
 // Seeder de démonstration en 1 clic pour peupler 12 joueurs, des médailles TMNF, des équipes RL Chapeaux et des preuves

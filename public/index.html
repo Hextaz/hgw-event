@@ -88,13 +88,47 @@
         <!-- CLASSEMENT + FIL D'ACTIVITÉ EN DIRECT -->
         <div class="leaderboard-layout">
           <div class="card">
-            <div class="card-header">
+            <div class="card-header" style="flex-wrap: wrap; gap: 0.75rem">
               <div>
                 <h2 class="card-title">📊 Classement Complet (50% Semaine Async / 50% Week-end Live)</h2>
               </div>
               <div style="display: flex; gap: 0.75rem; font-size: 0.76rem; color: var(--text-secondary)">
                 <span><strong style="color: var(--accent-emerald)">●</strong> Semaine (Async)</span>
                 <span><strong style="color: var(--accent-sky)">●</strong> Week-end (Live)</span>
+              </div>
+            </div>
+
+            <!-- BARRE DE RECHERCHE & FILTRES RAPIDES DU CLASSEMENT -->
+            <div
+              style="
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 0.75rem;
+                flex-wrap: wrap;
+                margin-bottom: 0.9rem;
+              "
+            >
+              <input
+                type="search"
+                id="lb-search-input"
+                class="input-field"
+                placeholder="🔍 Rechercher un joueur ou login TM..."
+                style="max-width: 260px; padding: 0.4rem 0.75rem; font-size: 0.84rem"
+              />
+              <div style="display: flex; gap: 0.4rem; flex-wrap: wrap" id="lb-filter-pills">
+                <button type="button" class="btn btn-primary btn-sm lb-filter-btn" data-filter="all">
+                  Tous
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm lb-filter-btn" data-filter="tombola">
+                  🎟️ Qualifiés Tombola (≥300)
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm lb-filter-btn" data-filter="async">
+                  🌱 Top Semaine (Async)
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm lb-filter-btn" data-filter="live">
+                  🔥 Top Week-end (Live)
+                </button>
               </div>
             </div>
 
@@ -236,25 +270,32 @@
 
           <div class="card">
             <div class="card-header">
-              <h2 class="card-title">📤 Vérificateur Automatique `.Replay.gbx`</h2>
-              <span class="badge badge-hard">Binaire GBX + SHA-256 + XML</span>
+              <h2 class="card-title">📤 Vérificateur Multi-Fichiers `.Replay.gbx`</h2>
+              <span class="badge badge-hard">Anti-Triche SHA-256 + Login TMNF</span>
             </div>
             <p style="font-size: 0.88rem; color: var(--text-secondary); margin-bottom: 0.85rem">
-              En fin de piste dans Trackmania, clique sur <strong>« Sauver le Replay »</strong> puis glisse ton fichier
-              <code>.Replay.gbx</code> ci-dessous. Le site détecte automatiquement la piste, vérifie ton temps au
-              millième et crédite la différence de points.
+              Glisse <strong>1 ou plusieurs fichiers <code>.Replay.gbx</code> d'un seul coup</strong> (jusqu'à 12 replays
+              en même temps !). Le site détecte chaque piste par son <code>UID</code>, vérifie ton login Trackmania, et
+              crédite tes médailles instantanément.
             </p>
 
             <form id="gbx-upload-form">
               <label for="gbx-file-input" class="gbx-dropzone" id="gbx-dropzone">
                 <div style="font-size: 1.65rem; margin-bottom: 0.25rem">🏁</div>
                 <div style="font-weight: 700; font-size: 0.95rem" id="gbx-file-label">
-                  Glisse ton fichier .Replay.gbx ici ou clique pour parcourir
+                  Glisse tes fichiers .Replay.gbx ici (envoi groupé supporté) ou clique pour parcourir
                 </div>
                 <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.25rem">
-                  Dossier par défaut : <code>Documents/TrackMania/Tracks/Replays/</code>
+                  Dossier : <code>Documents/TrackMania/Tracks/Replays/Replays</code>
                 </div>
-                <input type="file" id="gbx-file-input" name="replay" accept=".gbx" style="display: none" />
+                <input
+                  type="file"
+                  id="gbx-file-input"
+                  name="replays"
+                  accept=".gbx"
+                  multiple
+                  style="display: none"
+                />
               </label>
 
               <div
@@ -268,7 +309,7 @@
                 "
               >
                 <button type="submit" class="btn btn-emerald" id="gbx-submit-btn">
-                  ⚡ Analyser & Valider mon Replay (.gbx)
+                  ⚡ Analyser & Valider mes Replays (.gbx)
                 </button>
                 <a
                   href="/api/tmnf/sample-replay/medal_2"
@@ -478,16 +519,31 @@
           <div>
             <h2 class="section-title">🛡️ Dashboard Organisateur HGW (Cockpit Admin)</h2>
             <p class="section-desc">
-              Pilote les dates de début et de fin de la HGW, valide les preuves, gère les Chapeaux et les classements
-              des tournois, et lance le tirage officiel de la Tombola.
+              Pilote les dates de début et de fin de la HGW, valide les preuves avec aperçu direct, gère les Chapeaux et
+              classements des tournois, sauvegarde la base SQLite et lance la Roue de la Tombola.
             </p>
           </div>
-          <div style="display: flex; gap: 0.6rem; flex-wrap: wrap">
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap">
+            <a
+              href="/overlay.html"
+              target="_blank"
+              rel="noopener"
+              class="btn btn-primary btn-sm"
+              title="Ouvrir l'Overlay transparent 1920x1080 pour OBS Studio"
+            >
+              🎥 Overlay OBS (`/overlay.html`)
+            </a>
+            <a href="/api/admin/backup/sqlite" class="btn btn-secondary btn-sm" title="Télécharger la base SQLite à chaud">
+              💾 Backup `.sqlite`
+            </a>
+            <a href="/api/admin/backup/json" class="btn btn-secondary btn-sm" title="Exporter toutes les données en JSON">
+              📦 Export `.json`
+            </a>
             <button type="button" class="btn btn-emerald btn-sm" id="admin-seed-demo-btn">
-              ✨ Peupler / Réinitialiser 12 Joueurs de Démo
+              ✨ Peupler 12 Joueurs Démo
             </button>
             <button type="button" class="btn btn-secondary btn-sm" id="admin-cron-btn">
-              ⏰ Forcer le Tirage Quotidien (Reset 03h00)
+              ⏰ Reset 03h00
             </button>
           </div>
         </div>
@@ -576,7 +632,7 @@
         <!-- FILE D'ATTENTE DES PREUVES -->
         <div class="card" style="margin-bottom: 1.5rem">
           <div class="card-header">
-            <h3 class="card-title">🕵️ Preuves en attente de validation (`#preuves`)</h3>
+            <h3 class="card-title">🕵️ Preuves en attente de validation (`#preuves` • Aperçu Lightbox intégré)</h3>
           </div>
           <div id="admin-proofs-list"></div>
         </div>
@@ -709,12 +765,17 @@
               <span class="badge badge-easy">Seuil ≥ 300 pts</span>
             </div>
             <p style="font-size: 0.86rem; color: var(--text-secondary); margin-bottom: 1rem">
-              Tire au sort en direct le gagnant de la Tombola parmi tous les joueurs ayant atteint au moins
-              <strong>300 points</strong>. Le résultat est diffusé en temps réel sur les écrans de tous les joueurs !
+              Ouvre la <strong>Scène Stream Plein Écran (Roue / Slot Machine animée)</strong> pour faire tourner les
+              pseudos de tous les joueurs qualifiés (<strong>≥ 300 points</strong>) en direct sur ton stream !
             </p>
-            <button type="button" class="btn btn-primary" id="admin-draw-tombola-btn">
-              🎰 Lancer le Tirage au Sort de la Tombola en Direct
-            </button>
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap">
+              <button type="button" class="btn btn-primary" id="open-tombola-stage-btn">
+                🎰 Ouvrir la Roue Tombola Plein Écran (Mode Stream)
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm" id="admin-draw-tombola-btn">
+                ⚡ Tirage Rapide
+              </button>
+            </div>
             <div id="admin-tombola-winner-box" style="margin-top: 1rem"></div>
           </div>
         </div>
@@ -802,6 +863,135 @@
       </div>
     </div>
 
+    <!-- MODALE CLASSEMENT PAR PISTE TRACKMANIA + TÉLÉCHARGEMENT DU GHOST WR -->
+    <div class="modal-backdrop" id="track-leaderboard-modal">
+      <div class="modal-box" style="max-width: 680px">
+        <div class="card-header">
+          <div>
+            <h3 class="card-title" id="track-lb-title">🏁 Classement de la Piste</h3>
+            <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.15rem" id="track-lb-subtitle"></div>
+          </div>
+          <button type="button" class="btn btn-secondary btn-sm" id="track-lb-close">✕</button>
+        </div>
+        <div id="track-lb-wr-banner" style="margin-bottom: 0.9rem"></div>
+        <div class="table-wrap" style="max-height: 360px; overflow-y: auto">
+          <table class="hgw-table">
+            <thead>
+              <tr>
+                <th>Rang</th>
+                <th>Pilote</th>
+                <th>Chrono</th>
+                <th>Écart WR</th>
+                <th>Médaille</th>
+                <th>Ghost `.gbx`</th>
+              </tr>
+            </thead>
+            <tbody id="track-lb-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODALE LIGHTBOX PLEIN ÉCRAN POUR LES CAPTURES D'ÉCRAN DE PREUVES -->
+    <div class="modal-backdrop" id="lightbox-modal">
+      <div class="modal-box" style="max-width: 92vw; width: auto; text-align: center; padding: 1rem">
+        <div class="card-header" style="margin-bottom: 0.65rem">
+          <strong id="lightbox-caption" style="font-size: 0.92rem">Aperçu de la preuve</strong>
+          <button type="button" class="btn btn-secondary btn-sm" id="lightbox-close">✕ Fermer</button>
+        </div>
+        <img
+          id="lightbox-img"
+          src=""
+          alt="Capture d'écran de preuve"
+          style="max-width: 86vw; max-height: 80vh; border-radius: 8px; border: 1px solid var(--border-strong)"
+        />
+      </div>
+    </div>
+
+    <!-- SCÈNE PLEIN ÉCRAN "SHOW STREAM" POUR LA ROUE DE LA GRANDE TOMBOLA (≥ 300 PTS) -->
+    <div class="stream-stage-overlay" id="tombola-stage-overlay">
+      <div class="stream-stage-header">
+        <div>
+          <h2 class="section-title" style="font-size: 1.75rem">
+            🎰 Grande Tombola Officielle HGW — Tirage en Direct
+          </h2>
+          <p class="section-desc">
+            Tous les joueurs ayant atteint le palier de <strong>300 points</strong> possèdent leur ticket dans la roue !
+          </p>
+        </div>
+        <div style="display: flex; gap: 0.65rem; flex-wrap: wrap">
+          <button type="button" class="btn btn-primary" id="tombola-spin-btn">
+            🎰 Lancer la Roue de la Tombola !
+          </button>
+          <button type="button" class="btn btn-danger" id="tombola-stage-close-btn">✕ Fermer</button>
+        </div>
+      </div>
+
+      <!-- SLOT MACHINE / ROULETTE CENTRALE -->
+      <div
+        class="card"
+        style="
+          max-width: 760px;
+          margin: 1.5rem auto 2rem auto;
+          text-align: center;
+          padding: 2.25rem 1.5rem;
+          border: 2px solid var(--accent-gold);
+          box-shadow: 0 0 50px hsla(43, 96%, 58%, 0.2);
+        "
+      >
+        <div
+          style="
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--accent-gold);
+            font-weight: 700;
+            margin-bottom: 0.6rem;
+          "
+          id="tombola-wheel-status"
+        >
+          🎟️ Prêt pour le tirage officiel
+        </div>
+        <div
+          id="tombola-wheel-display"
+          style="
+            font-family: var(--font-display);
+            font-size: clamp(2rem, 4vw, 3.2rem);
+            font-weight: 700;
+            padding: 1.25rem;
+            border-radius: var(--radius-md);
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-strong);
+            min-height: 110px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          "
+        >
+          Clique sur « Lancer la Roue » !
+        </div>
+      </div>
+
+      <div style="max-width: 960px; margin: 0 auto">
+        <div
+          style="
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            font-weight: 700;
+            margin-bottom: 0.75rem;
+            text-align: center;
+          "
+        >
+          Joueurs Qualifiés dans l'Urne (≥ 300 pts)
+        </div>
+        <div
+          id="tombola-candidates-grid"
+          style="display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: center"
+        ></div>
+      </div>
+    </div>
+
     <!-- SCÈNE PLEIN ÉCRAN "SHOW STREAM ZLAN" POUR LE TIRAGE DES CHAPEAUX -->
     <div class="stream-stage-overlay" id="stream-stage-overlay">
       <div class="stream-stage-header">
@@ -870,6 +1060,6 @@
     </div>
 
     <div class="toast-container" id="toast-container"></div>
-    <script type="module" src="/app.js?v=1.3.1"></script>
+    <script type="module" src="/app.js?v=1.4.0"></script>
   </body>
 </html>

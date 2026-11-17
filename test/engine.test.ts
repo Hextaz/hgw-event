@@ -6,7 +6,9 @@ import { initDb } from '../src/db.js';
 import {
   drawDailyQuestsForUser,
   generateBalancedTeams,
+  getEventSettings,
   getGlobalLeaderboard,
+  getMapLeaderboard,
   recordTmnfLiveServerFinish,
   rerollDailyAssignment,
   reviewDailyAssignment,
@@ -14,6 +16,7 @@ import {
   saveUserSelectedGames,
   submitDailyProof,
   submitTmnfReplay,
+  updateEventSettings,
   updateFallGuysScoresAndRankings,
 } from '../src/engine.js';
 import { buildSampleReplayGbx } from '../src/gbx.js';
@@ -233,7 +236,63 @@ async function runTests() {
     'Le 1er temps sur la map hebdo depuis le serveur dédié doit créditer automatiquement +150 pts au classement général'
   );
 
-  console.log('✅ Tous les tests unitaires et d’intégration HGW sont passés avec succès !');
+  // 9. Tests V3 : Anti-partage de login TMNF inter-joueurs, Classement par piste & Verrouillage de fin d'événement
+  const stolenLoginReplay = buildSampleReplayGbx({
+    mapUid: mapA01.uid,
+    bestTimeMs: mapA01.author_ms - 500,
+    playerLogin: 'hextaz_tm', // déjà lié à u1
+    nonce: 'stolen_by_u2',
+  });
+  assert.throws(
+    () =>
+      submitTmnfReplay(db, {
+        userId: 'u2',
+        buffer: stolenLoginReplay,
+        fileName: 'stolen.Replay.gbx',
+      }),
+    /appartient déjà au joueur/,
+    'Deux comptes Discord différents ne peuvent pas partager le même login Trackmania'
+  );
+
+  const u2ValidReplay = buildSampleReplayGbx({
+    mapUid: mapA01.uid,
+    bestTimeMs: mapA01.gold_ms - 50,
+    playerLogin: 'player2_tm',
+    nonce: 'u2_gold_run',
+  });
+  submitTmnfReplay(db, {
+    userId: 'u2',
+    buffer: u2ValidReplay,
+    fileName: 'u2_gold.Replay.gbx',
+  });
+
+  const mapLb = getMapLeaderboard(db, 'medal_1');
+  assert.equal(mapLb.entries.length, 2, 'La piste medal_1 doit compter 2 joueurs classés');
+  assert.equal(mapLb.entries[0].user_id, 'u1');
+  assert.equal(mapLb.entries[0].delta_wr_ms, 0);
+  assert.equal(mapLb.entries[1].user_id, 'u2');
+  assert.ok(mapLb.entries[1].delta_wr_ms > 0, 'Le 2e joueur doit avoir un delta positif par rapport au WR');
+
+  updateEventSettings(db, { status_mode: 'closed' });
+  const settingsClosed = getEventSettings(db);
+  assert.equal(settingsClosed.effective_phase, 'closed');
+  assert.throws(
+    () =>
+      submitTmnfReplay(db, {
+        userId: 'u2',
+        buffer: buildSampleReplayGbx({
+          mapUid: mapA01.uid,
+          bestTimeMs: mapA01.author_ms - 10,
+          playerLogin: 'player2_tm',
+          nonce: 'after_close',
+        }),
+        fileName: 'late.Replay.gbx',
+      }),
+    /clôturée/,
+    'Aucun replay ne peut être soumis lorsque l’événement est clôturé'
+  );
+
+  console.log('✅ Tous les tests unitaires et d’intégration HGW (V1 + V2 + V3) sont passés avec succès !');
 }
 
 runTests().catch((err) => {

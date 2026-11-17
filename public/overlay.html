@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HGW — Overlay OBS Temps Réel (1920x1080 Transparent)</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@600;700&family=Plus+Jakarta+Sans:wght@500;600;700&family=Space+Grotesk:wght@700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg-panel: hsla(228, 32%, 8%, 0.88);
+        --border-gold: hsla(43, 96%, 58%, 0.45);
+        --accent-gold: hsl(43, 96%, 58%);
+        --accent-emerald: hsl(156, 78%, 46%);
+        --accent-sky: hsl(199, 92%, 60%);
+        --text-primary: hsl(214, 32%, 96%);
+        --text-secondary: hsl(218, 18%, 74%);
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      html,
+      body {
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background: transparent !important;
+        font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+        color: var(--text-primary);
+      }
+
+      /* Alerte Broadcast centrale (poppe pendant 6.5s sur événement SSE) */
+      .obs-alert-stage {
+        position: fixed;
+        top: 28px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        pointer-events: none;
+      }
+
+      .obs-alert-card {
+        background: linear-gradient(135deg, hsla(228, 36%, 10%, 0.95), hsla(228, 28%, 14%, 0.95));
+        border: 2px solid var(--accent-gold);
+        box-shadow: 0 14px 40px rgba(0, 0, 0, 0.7), 0 0 28px hsla(43, 96%, 58%, 0.35);
+        border-radius: 14px;
+        padding: 14px 24px;
+        min-width: 440px;
+        max-width: 760px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        animation: alertSlideIn 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+      }
+
+      @keyframes alertSlideIn {
+        from {
+          opacity: 0;
+          transform: translateY(-28px) scale(0.95);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+      }
+
+      .obs-alert-badge {
+        background: var(--accent-gold);
+        color: #090b10;
+        font-family: 'Space Grotesk', sans-serif;
+        font-weight: 700;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        padding: 5px 10px;
+        border-radius: 999px;
+        letter-spacing: 0.05em;
+        white-space: nowrap;
+      }
+
+      .obs-alert-text {
+        font-size: 1rem;
+        font-weight: 700;
+        line-height: 1.3;
+      }
+
+      /* Widget HUD Classement Top 5 */
+      .obs-hud {
+        position: fixed;
+        top: 28px;
+        left: 28px;
+        width: 340px;
+        background: var(--bg-panel);
+        backdrop-filter: blur(12px);
+        border: 1px solid var(--border-gold);
+        border-radius: 14px;
+        padding: 14px 16px;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+      }
+
+      .obs-hud.pos-tr {
+        left: auto;
+        right: 28px;
+      }
+      .obs-hud.pos-bl {
+        top: auto;
+        bottom: 28px;
+      }
+      .obs-hud.pos-br {
+        top: auto;
+        left: auto;
+        bottom: 28px;
+        right: 28px;
+      }
+
+      .obs-hud-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-bottom: 10px;
+        margin-bottom: 10px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .obs-brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .obs-brand-mark {
+        background: linear-gradient(135deg, var(--accent-gold), hsl(28, 95%, 52%));
+        color: #090b10;
+        font-family: 'Space Grotesk', sans-serif;
+        font-weight: 700;
+        font-size: 0.8rem;
+        padding: 3px 7px;
+        border-radius: 6px;
+      }
+
+      .obs-title {
+        font-family: 'Space Grotesk', sans-serif;
+        font-size: 0.92rem;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+
+      .obs-live-dot {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.72rem;
+        color: var(--accent-emerald);
+        font-weight: 700;
+      }
+
+      .obs-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 6px 8px;
+        border-radius: 8px;
+        margin-bottom: 4px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .obs-row.rank-1 {
+        background: linear-gradient(90deg, hsla(43, 96%, 58%, 0.18), rgba(255, 255, 255, 0.02));
+        border-left: 3px solid var(--accent-gold);
+      }
+
+      .obs-rank {
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 0.82rem;
+        width: 28px;
+        color: var(--accent-gold);
+      }
+
+      .obs-name {
+        font-weight: 600;
+        font-size: 0.88rem;
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .obs-pts {
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 0.86rem;
+        color: var(--accent-gold);
+      }
+
+      .obs-footer {
+        margin-top: 10px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.75rem;
+        color: var(--text-secondary);
+      }
+
+      .mono {
+        font-family: 'JetBrains Mono', monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="obs-alert-stage" id="obs-alert-stage"></div>
+
+    <aside class="obs-hud" id="obs-hud">
+      <div class="obs-hud-header">
+        <div class="obs-brand">
+          <span class="obs-brand-mark">HGW</span>
+          <span class="obs-title">TOP 5 EN DIRECT</span>
+        </div>
+        <span class="obs-live-dot" id="obs-sse-dot">● LIVE</span>
+      </div>
+
+      <div id="obs-top5-list"></div>
+
+      <div class="obs-footer">
+        <span id="obs-wr-tm">🏎️ WR : —</span>
+        <span id="obs-tombola-count" class="mono">🎟️ 0 qualifiés</span>
+      </div>
+    </aside>
+
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const pos = params.get('pos');
+      if (pos && ['tr', 'bl', 'br'].includes(pos)) {
+        document.getElementById('obs-hud').classList.add('pos-' + pos);
+      }
+
+      function escapeHtml(s) {
+        return String(s || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+      }
+
+      function pushAlert(badge, message) {
+        const stage = document.getElementById('obs-alert-stage');
+        const el = document.createElement('div');
+        el.className = 'obs-alert-card';
+        el.innerHTML = `
+          <span class="obs-alert-badge">${escapeHtml(badge)}</span>
+          <div class="obs-alert-text">${escapeHtml(message)}</div>
+        `;
+        stage.appendChild(el);
+        setTimeout(() => el.remove(), 6500);
+      }
+
+      async function refreshHud() {
+        try {
+          const res = await fetch('/api/state');
+          const state = await res.json();
+          const lb = (state.leaderboard || []).slice(0, 5);
+          const listEl = document.getElementById('obs-top5-list');
+
+          listEl.innerHTML = lb
+            .map(
+              (p, i) => `
+              <div class="obs-row ${i === 0 ? 'rank-1' : ''}">
+                <span class="obs-rank">${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i + 1)}</span>
+                <span class="obs-name">${escapeHtml(p.display_name)}</span>
+                <span class="obs-pts">${p.total_points} pts</span>
+              </div>
+            `
+            )
+            .join('');
+
+          const wr = (state.weeklyTmnfLeaderboard || [])[0];
+          document.getElementById('obs-wr-tm').innerHTML = wr
+            ? `🏎️ WR : <strong>${escapeHtml(wr.display_name)}</strong> (<span class="mono" style="color:var(--accent-emerald)">${wr.formatted_time}</span>)`
+            : '🏎️ Serveur 24/7';
+
+          const qualCount = (state.leaderboard || []).filter((p) => p.tombola_eligible).length;
+          document.getElementById('obs-tombola-count').textContent = `🎟️ ${qualCount} Tombola`;
+        } catch {
+          // ignore fetch error
+        }
+      }
+
+      const es = new EventSource('/api/events');
+      es.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.type === 'connected') return;
+          if (data.message) {
+            const labelMap = {
+              tmnf_live_finish: 'RECORD SERVEUR TMNF',
+              tmnf_replay: 'REPLAY .GBX VALIDÉ',
+              points_updated: 'POINTS HGW',
+              teams_drawn: 'TIRAGE CHAPEAUX',
+              tombola_winner: 'GRANDE TOMBOLA',
+            };
+            pushAlert(labelMap[data.type] || 'HGW LIVE', data.message);
+          }
+          refreshHud();
+        } catch {
+          // ignore
+        }
+      };
+
+      refreshHud();
+    </script>
+  </body>
+</html>

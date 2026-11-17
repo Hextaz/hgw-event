@@ -2,8 +2,12 @@ let appState = null;
 let selectedGameIds = new Set();
 let gamesDrawerOpen = false;
 let pastedProofFile = null;
+let selectedGbxFiles = [];
 let streamRevealQueue = [];
 let streamRevealIndex = 0;
+let leaderboardSearch = '';
+let leaderboardFilter = 'all';
+let tombolaSpinning = false;
 
 function showToast(message) {
   const container = document.getElementById('toast-container');
@@ -318,13 +322,31 @@ function renderPodium() {
 
 function renderLeaderboardAndFeed() {
   const tbody = document.getElementById('leaderboard-tbody');
-  const rows = appState.leaderboard || [];
+  let rows = [...(appState.leaderboard || [])];
+
+  if (leaderboardSearch.trim() !== '') {
+    const q = leaderboardSearch.trim().toLowerCase();
+    rows = rows.filter(
+      (p) =>
+        (p.display_name || '').toLowerCase().includes(q) ||
+        (p.username || '').toLowerCase().includes(q) ||
+        (p.tmnf_login || '').toLowerCase().includes(q)
+    );
+  }
+
+  if (leaderboardFilter === 'tombola') {
+    rows = rows.filter((p) => p.tombola_eligible);
+  } else if (leaderboardFilter === 'async') {
+    rows.sort((a, b) => b.async_points - a.async_points || b.total_points - a.total_points);
+  } else if (leaderboardFilter === 'live') {
+    rows.sort((a, b) => b.live_points - a.live_points || b.total_points - a.total_points);
+  }
 
   if (rows.length === 0) {
     tbody.innerHTML = `
       <tr>
         <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">
-          Aucun joueur inscrit pour l'instant.
+          Aucun joueur ne correspond à ce filtre.
         </td>
       </tr>
     `;
@@ -429,7 +451,7 @@ async function openPlayerLedgerModal(userId) {
               Catégorie : ${e.category.toUpperCase()} • Réf : ${escapeHtml(e.source_ref)}
             </div>
           </div>
-          <span class="feed-pts">+${e.points} pts</span>
+          <span class="feed-pts">${e.points >= 0 ? `+${e.points}` : e.points} pts</span>
         </div>
       `
       )
@@ -437,6 +459,84 @@ async function openPlayerLedgerModal(userId) {
   }
 
   document.getElementById('player-ledger-modal').classList.add('open');
+}
+
+async function openTrackLeaderboardModal(mapId) {
+  const res = await fetch(`/api/tmnf/map/${encodeURIComponent(mapId)}/leaderboard`);
+  if (!res.ok) return;
+  const data = await res.json();
+  const m = data.map;
+  const entries = data.entries || [];
+
+  document.getElementById('track-lb-title').textContent = `🏁 ${m.code} — ${m.name}`;
+  document.getElementById('track-lb-subtitle').innerHTML = `
+    UID : <code class="mono">${escapeHtml(m.uid)}</code> • Auteur : <strong class="mono">${m.author_formatted}</strong> • Or : <strong class="mono">${m.gold_formatted}</strong>
+  `;
+
+  const wrBanner = document.getElementById('track-lb-wr-banner');
+  if (entries.length > 0) {
+    const wr = entries[0];
+    wrBanner.innerHTML = `
+      <div style="background:var(--bg-elevated);padding:0.85rem 1rem;border-radius:var(--radius-md);border:1px solid var(--accent-gold);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.75rem;">
+        <div>
+          <div style="font-size:0.72rem;text-transform:uppercase;color:var(--accent-gold);font-weight:700;">🏆 Record du Serveur (WR Discord)</div>
+          <div style="font-size:1.05rem;font-weight:700;margin-top:0.15rem;">
+            ${escapeHtml(wr.display_name)} — <span class="mono" style="color:var(--accent-emerald);">${wr.formatted_time}</span>
+          </div>
+        </div>
+        <a href="/api/tmnf/map/${encodeURIComponent(m.id)}/ghost/${encodeURIComponent(wr.user_id)}" class="btn btn-primary btn-sm">
+          👻 Télécharger le Ghost WR (.Replay.gbx)
+        </a>
+      </div>
+    `;
+  } else {
+    wrBanner.innerHTML = `
+      <div style="background:var(--bg-elevated);padding:0.85rem 1rem;border-radius:var(--radius-md);color:var(--text-muted);font-size:0.86rem;">
+        Aucun temps soumis sur cette piste pour le moment. Sois le premier à poser le WR Discord !
+      </div>
+    `;
+  }
+
+  const tbody = document.getElementById('track-lb-tbody');
+  if (entries.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:1.5rem;">Aucun chrono enregistré.</td></tr>`;
+  } else {
+    tbody.innerHTML = entries
+      .map(
+        (e) => `
+        <tr>
+          <td class="rank-cell">${e.rank === 1 ? '🥇 #1' : e.rank === 2 ? '🥈 #2' : e.rank === 3 ? '🥉 #3' : `#${e.rank}`}</td>
+          <td>
+            <strong>${escapeHtml(e.display_name)}</strong>
+            ${e.tmnf_login ? `<span class="mono" style="font-size:0.72rem;color:var(--text-muted);margin-left:4px;">[${escapeHtml(e.tmnf_login)}]</span>` : ''}
+          </td>
+          <td class="mono" style="font-weight:700;color:var(--accent-emerald);">${e.formatted_time}</td>
+          <td class="mono" style="font-size:0.8rem;color:var(--text-secondary);">
+            ${e.delta_wr_ms === 0 ? 'WR' : `+${(e.delta_wr_ms / 1000).toFixed(3)}s`}
+          </td>
+          <td><span class="badge badge-easy">${e.medal.toUpperCase()}</span></td>
+          <td>
+            <a href="/api/tmnf/map/${encodeURIComponent(m.id)}/ghost/${encodeURIComponent(e.user_id)}" class="btn btn-secondary btn-sm" title="Télécharger le fantôme .Replay.gbx de ${escapeHtml(e.display_name)}">
+              👻 Ghost
+            </a>
+          </td>
+        </tr>
+      `
+      )
+      .join('');
+  }
+
+  document.getElementById('track-leaderboard-modal').classList.add('open');
+}
+
+function openLightbox(src, caption) {
+  const modal = document.getElementById('lightbox-modal');
+  const img = document.getElementById('lightbox-img');
+  const cap = document.getElementById('lightbox-caption');
+  if (!modal || !img) return;
+  img.src = src;
+  if (cap) cap.textContent = caption || 'Aperçu de la preuve';
+  modal.classList.add('open');
 }
 
 function renderQuestsAndGames() {
@@ -732,9 +832,9 @@ function renderTrackmania() {
               </span>
             </div>
 
-            <div class="wr-strip" style="margin-bottom:0.65rem;">
+            <div class="wr-strip" style="margin-bottom:0.65rem;cursor:pointer;" data-open-track-lb="${m.id}" title="Voir le classement complet de la piste et télécharger le Ghost WR">
               <span>🏆 WR Discord : <strong>${m.wr_holder ? escapeHtml(m.wr_holder) : '—'}</strong></span>
-              <span class="mono" style="color:var(--accent-gold);font-weight:700;">${m.wr_formatted || '—'}</span>
+              <span class="mono" style="color:var(--accent-gold);font-weight:700;">${m.wr_formatted || '—'} 👻</span>
             </div>
 
             <div class="medal-pips-row">
@@ -762,14 +862,23 @@ function renderTrackmania() {
               Mon record : <strong class="mono">${sub ? sub.best_time_formatted : '—'}</strong>
               <div style="margin-top:0.15rem;">${nextGoalHtml}</div>
             </div>
-            <a href="/api/tmnf/sample-replay/${m.id}" class="btn btn-secondary btn-sm" title="Télécharger un replay .gbx d'exemple sur cette piste">
-              🧪 .gbx
-            </a>
+            <div style="display:flex;gap:0.35rem;">
+              <button type="button" class="btn btn-secondary btn-sm" data-open-track-lb="${m.id}" title="Voir le classement de la piste et télécharger le Ghost WR">
+                👻 Top & Ghost
+              </button>
+              <a href="/api/tmnf/sample-replay/${m.id}" class="btn btn-secondary btn-sm" title="Télécharger un replay .gbx d'exemple sur cette piste">
+                🧪 .gbx
+              </a>
+            </div>
           </div>
         </article>
       `;
     })
     .join('');
+
+  cardsGrid.querySelectorAll('[data-open-track-lb]').forEach((el) => {
+    el.addEventListener('click', () => openTrackLeaderboardModal(el.dataset.openTrackLb));
+  });
 }
 
 function renderTournaments() {
@@ -984,6 +1093,104 @@ function revealNextStreamSlot() {
   }
 }
 
+/**
+ * Scène Plein Écran pour la Roue / Slot Machine de la Grande Tombola (≥ 300 pts)
+ */
+function openTombolaStage() {
+  const overlay = document.getElementById('tombola-stage-overlay');
+  const grid = document.getElementById('tombola-candidates-grid');
+  const display = document.getElementById('tombola-wheel-display');
+  const status = document.getElementById('tombola-wheel-status');
+
+  const qualified = (appState?.leaderboard || []).filter((p) => p.tombola_eligible);
+  status.textContent = `🎟️ ${qualified.length} joueur(s) qualifié(s) dans l'urne (≥ 300 pts)`;
+
+  if (qualified.length === 0) {
+    display.innerHTML = `<span style="color:var(--text-muted);font-size:1.3rem;">Aucun joueur n'a encore atteint 300 pts</span>`;
+    grid.innerHTML = '';
+  } else {
+    display.innerHTML = `Clique sur « 🎰 Lancer la Roue » !`;
+    grid.innerHTML = qualified
+      .map(
+        (p) => `
+        <div
+          class="badge badge-easy tombola-candidate-chip"
+          data-uid="${p.id}"
+          style="font-size:0.92rem;padding:0.5rem 0.9rem;transition:all 0.12s ease;"
+        >
+          🎟️ <strong>${escapeHtml(p.display_name)}</strong> <span class="mono" style="margin-left:4px;">(${p.total_points} pts)</span>
+        </div>
+      `
+      )
+      .join('');
+  }
+
+  overlay.classList.add('open');
+}
+
+async function spinTombolaWheel() {
+  if (tombolaSpinning) return;
+  const res = await fetch('/api/admin/tombola/draw', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) {
+    showToast(`❌ ${data.error}`);
+    return;
+  }
+
+  const candidates = data.candidates || [];
+  const winner = data.winner;
+  const display = document.getElementById('tombola-wheel-display');
+  const status = document.getElementById('tombola-wheel-status');
+  const chips = Array.from(document.querySelectorAll('.tombola-candidate-chip'));
+
+  tombolaSpinning = true;
+  status.textContent = '🎰 TIRAGE EN COURS...';
+
+  const totalSteps = 34;
+  for (let step = 0; step < totalSteps; step++) {
+    const pick =
+      step === totalSteps - 1
+        ? winner
+        : candidates[(step + Math.floor(Math.random() * candidates.length)) % candidates.length];
+
+    chips.forEach((c) => {
+      const active = c.dataset.uid === pick.id;
+      c.style.transform = active ? 'scale(1.14)' : 'scale(1)';
+      c.style.boxShadow = active ? '0 0 20px var(--accent-gold)' : 'none';
+      c.style.borderColor = active ? 'var(--accent-gold)' : '';
+    });
+
+    if (step < totalSteps - 1) {
+      display.innerHTML = `<span style="color:var(--text-primary);">🎲 ${escapeHtml(pick.display_name)}</span>`;
+      const delayMs = Math.round(45 + Math.pow(step / totalSteps, 2.3) * 290);
+      await new Promise((r) => setTimeout(r, delayMs));
+    } else {
+      display.innerHTML = `
+        <div>
+          <div style="font-size:0.9rem;color:var(--accent-emerald);margin-bottom:0.2rem;">🏆 GAGNANT DE LA GRANDE TOMBOLA HGW 🏆</div>
+          <div style="color:var(--accent-gold);text-shadow:0 0 25px hsla(43,96%,58%,0.5);">
+            🎉 ${escapeHtml(winner.display_name)} (${winner.total_points} pts) 🎉
+          </div>
+        </div>
+      `;
+      status.textContent = '🎊 Tirage officiel terminé et diffusé en direct !';
+    }
+  }
+
+  const box = document.getElementById('admin-tombola-winner-box');
+  if (box) {
+    box.style.display = 'block';
+    box.innerHTML = `
+      🎉 <strong>GAGNANT TIRÉ AU SORT (${data.eligibleCount} qualifiés ≥ 300 pts) :</strong>
+      <div style="font-family:var(--font-display);font-size:1.35rem;color:var(--accent-gold);margin-top:0.2rem;">
+        🎟️ ${escapeHtml(winner.display_name)} (${winner.total_points} pts)
+      </div>
+    `;
+  }
+
+  tombolaSpinning = false;
+}
+
 function renderAdmin() {
   // 1. KPIs Admin
   const stats = appState.admin?.stats;
@@ -1041,7 +1248,7 @@ function renderAdmin() {
     if (weeklyUidInput && weeklyMapObj) weeklyUidInput.value = weeklyMapObj.uid || '';
   }
 
-  // 3. File de Modération #preuves
+  // 3. File de Modération #preuves (avec Miniature & Lightbox directe)
   const proofsList = document.getElementById('admin-proofs-list');
   const pending = appState.admin?.pendingProofs || [];
 
@@ -1051,8 +1258,10 @@ function renderAdmin() {
     proofsList.innerHTML = `
       <div class="grid-2">
         ${pending
-          .map(
-            (p) => `
+          .map((p) => {
+            const isImg = p.proof_file && /\.(png|jpe?g|webp|gif)$/i.test(p.proof_file);
+            const fileUrl = p.proof_file ? `/uploads/proofs/${encodeURIComponent(p.proof_file)}` : '';
+            return `
             <div style="background:var(--bg-elevated);padding:1rem;border-radius:var(--radius-md);border:1px solid var(--border-subtle);display:flex;flex-direction:column;justify-content:space-between;gap:0.75rem;">
               <div>
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
@@ -1067,8 +1276,19 @@ function renderAdmin() {
                     : ''
                 }
                 ${
-                  p.proof_file
-                    ? `<div style="margin-top:0.5rem;"><a href="/uploads/proofs/${encodeURIComponent(p.proof_file)}" target="_blank" style="color:var(--accent-emerald);font-size:0.82rem;">🖼️ Voir le fichier envoyé (${escapeHtml(p.proof_file)})</a></div>`
+                  isImg
+                    ? `<div style="margin-top:0.55rem;">
+                         <img
+                           src="${fileUrl}"
+                           alt="Preuve"
+                           data-lightbox-src="${fileUrl}"
+                           data-lightbox-cap="${escapeHtml(p.display_name)} — ${escapeHtml(p.title)}"
+                           style="max-height:150px;max-width:100%;border-radius:6px;border:1px solid var(--border-strong);cursor:zoom-in;display:block;"
+                           title="Cliquer pour agrandir en plein écran"
+                         />
+                       </div>`
+                    : p.proof_file
+                    ? `<div style="margin-top:0.5rem;"><a href="${fileUrl}" target="_blank" style="color:var(--accent-emerald);font-size:0.82rem;">🎬 Voir la vidéo / fichier envoyé (${escapeHtml(p.proof_file)})</a></div>`
                     : ''
                 }
                 ${
@@ -1086,11 +1306,15 @@ function renderAdmin() {
                 </button>
               </div>
             </div>
-          `
-          )
+          `;
+          })
           .join('')}
       </div>
     `;
+
+    proofsList.querySelectorAll('[data-lightbox-src]').forEach((img) => {
+      img.addEventListener('click', () => openLightbox(img.dataset.lightboxSrc, img.dataset.lightboxCap));
+    });
 
     proofsList.querySelectorAll('.admin-approve-btn').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -1280,6 +1504,22 @@ window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('cta-open-quests').addEventListener('click', () => switchView('defis'));
   document.getElementById('cta-open-tm').addEventListener('click', () => switchView('trackmania'));
 
+  // Recherche & Filtres rapides du Classement Général
+  document.getElementById('lb-search-input')?.addEventListener('input', (e) => {
+    leaderboardSearch = e.target.value || '';
+    renderLeaderboardAndFeed();
+  });
+
+  document.querySelectorAll('.lb-filter-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      leaderboardFilter = btn.dataset.filter || 'all';
+      document.querySelectorAll('.lb-filter-btn').forEach((b) => {
+        b.className = `btn ${b.dataset.filter === leaderboardFilter ? 'btn-primary' : 'btn-secondary'} btn-sm lb-filter-btn`;
+      });
+      renderLeaderboardAndFeed();
+    });
+  });
+
   document.getElementById('toggle-games-drawer-btn').addEventListener('click', () => {
     gamesDrawerOpen = !gamesDrawerOpen;
     renderQuestsAndGames();
@@ -1378,9 +1618,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     await fetchState();
   });
 
-  // Modale Détail Points Joueur
+  // Modales Détail Points Joueur, Classement Piste & Lightbox
   document.getElementById('player-ledger-close').addEventListener('click', () => {
     document.getElementById('player-ledger-modal').classList.remove('open');
+  });
+  document.getElementById('track-lb-close')?.addEventListener('click', () => {
+    document.getElementById('track-leaderboard-modal').classList.remove('open');
+  });
+  document.getElementById('lightbox-close')?.addEventListener('click', () => {
+    document.getElementById('lightbox-modal').classList.remove('open');
   });
 
   // Modale Login
@@ -1404,14 +1650,42 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Upload .Replay.gbx
+  // Upload Multi-Fichiers .Replay.gbx (Sélection multiple + Drag & Drop)
   const gbxInput = document.getElementById('gbx-file-input');
   const gbxLabel = document.getElementById('gbx-file-label');
+  const gbxDropzone = document.getElementById('gbx-dropzone');
+
+  const updateGbxFilesLabel = (filesList) => {
+    selectedGbxFiles = Array.from(filesList || []);
+    if (selectedGbxFiles.length === 1) {
+      gbxLabel.textContent = `1 fichier prêt : ${selectedGbxFiles[0].name}`;
+    } else if (selectedGbxFiles.length > 1) {
+      gbxLabel.textContent = `📦 ${selectedGbxFiles.length} fichiers .Replay.gbx prêts pour l'analyse groupée !`;
+    }
+  };
+
   gbxInput.addEventListener('change', () => {
-    if (gbxInput.files?.[0]) {
-      gbxLabel.textContent = `Fichier prêt : ${gbxInput.files[0].name}`;
+    if (gbxInput.files?.length) {
+      updateGbxFilesLabel(gbxInput.files);
     }
   });
+
+  if (gbxDropzone) {
+    gbxDropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      gbxDropzone.style.borderColor = 'var(--accent-gold)';
+    });
+    gbxDropzone.addEventListener('dragleave', () => {
+      gbxDropzone.style.borderColor = '';
+    });
+    gbxDropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      gbxDropzone.style.borderColor = '';
+      if (e.dataTransfer?.files?.length) {
+        updateGbxFilesLabel(e.dataTransfer.files);
+      }
+    });
+  }
 
   document.getElementById('gbx-upload-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1419,15 +1693,16 @@ window.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('login-modal').classList.add('open');
       return;
     }
-    if (!gbxInput.files?.[0]) {
-      showToast('❌ Sélectionne d’abord un fichier .Replay.gbx.');
+    const filesToSend = selectedGbxFiles.length > 0 ? selectedGbxFiles : Array.from(gbxInput.files || []);
+    if (filesToSend.length === 0) {
+      showToast('❌ Sélectionne ou glisse au moins un fichier .Replay.gbx.');
       return;
     }
 
     const fd = new FormData();
-    fd.append('replay', gbxInput.files[0]);
+    filesToSend.forEach((f) => fd.append('replays', f));
 
-    const res = await fetch('/api/tmnf/submit-replay', {
+    const res = await fetch('/api/tmnf/submit-replays-batch', {
       method: 'POST',
       body: fd,
     });
@@ -1439,17 +1714,27 @@ window.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    const linesHtml = (data.results || [])
+      .map((r) =>
+        r.ok
+          ? `<div style="margin-top:0.25rem;">✅ <strong>${escapeHtml(r.mapCode)} (${escapeHtml(r.mapName)})</strong> : <strong class="mono">${r.formattedTime}</strong> (${r.medal.toUpperCase()} • ${r.deltaPoints > 0 ? `+${r.deltaPoints} pts` : 'PB / enregistré'})</div>`
+          : `<div style="margin-top:0.25rem;color:hsl(0,90%,72%);">❌ <strong>${escapeHtml(r.fileName)}</strong> : ${escapeHtml(r.error)}</div>`
+      )
+      .join('');
+
     banner.innerHTML = `
-      <div style="padding:0.85rem;border-radius:6px;background:var(--accent-emerald-soft);color:hsl(156,78%,62%);font-size:0.88rem;">
-        ✅ <strong>${escapeHtml(data.mapName)}</strong> — Chrono : <strong class="mono">${data.formattedTime}</strong>
-        (Médaille : <strong>${data.medal.toUpperCase()}</strong> • ${data.deltaPoints > 0 ? `+${data.deltaPoints} pts crédités !` : 'Temps enregistré'})
+      <div style="padding:0.85rem;border-radius:6px;background:var(--accent-emerald-soft);color:hsl(156,78%,62%);font-size:0.86rem;">
+        <strong>🏁 Bilan du lot : ${data.validCount} replay(s) validé(s)${data.totalDeltaPoints > 0 ? ` • +${data.totalDeltaPoints} pts crédités !` : ''}</strong>
+        ${linesHtml}
       </div>
     `;
-    showToast(`🏁 Replay validé : ${data.formattedTime} sur ${data.mapCode} !`);
+    selectedGbxFiles = [];
+    gbxInput.value = '';
+    showToast(`🏁 ${data.validCount} replay(s) analysé(s)${data.totalDeltaPoints > 0 ? ` (+${data.totalDeltaPoints} pts)` : ''} !`);
     await fetchState();
   });
 
-  // Mode Show Stream Plein Écran (Chapeaux)
+  // Mode Show Stream Plein Écran (Chapeaux & Roue Tombola)
   document.getElementById('open-stream-show-btn').addEventListener('click', openStreamRevealStage);
   document.getElementById('stream-next-step-btn').addEventListener('click', revealNextStreamSlot);
   document.getElementById('stream-reveal-all-btn').addEventListener('click', () => {
@@ -1460,6 +1745,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('stream-reset-reveal-btn').addEventListener('click', openStreamRevealStage);
   document.getElementById('stream-close-btn').addEventListener('click', () => {
     document.getElementById('stream-stage-overlay').classList.remove('open');
+  });
+
+  document.getElementById('open-tombola-stage-btn')?.addEventListener('click', openTombolaStage);
+  document.getElementById('tombola-spin-btn')?.addEventListener('click', spinTombolaWheel);
+  document.getElementById('tombola-stage-close-btn')?.addEventListener('click', () => {
+    document.getElementById('tombola-stage-overlay').classList.remove('open');
   });
 
   window.addEventListener('keydown', (e) => {
@@ -1571,9 +1862,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('admin-manual-points-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
+    const catEl = document.getElementById('manual-pts-cat') || document.getElementById('manual-pts-category');
     const payload = {
       userId: document.getElementById('manual-pts-user').value,
-      category: document.getElementById('manual-pts-category').value,
+      category: catEl ? catEl.value : 'async',
       points: Number(document.getElementById('manual-pts-amount').value),
       label: document.getElementById('manual-pts-label').value.trim(),
     };
@@ -1583,7 +1875,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       body: JSON.stringify(payload),
     });
     if (res.ok) {
-      document.getElementById('manual-pts-amount').value = '';
+      document.getElementById('manual-pts-amount').value = '25';
       document.getElementById('manual-pts-label').value = '';
       showToast('🎁 Points bonus/ajustement crédités en direct !');
       await fetchState();
