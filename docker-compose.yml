@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    container_name: hgw-event
+    restart: unless-stopped
+    # Décision D4 : Exposition locale stricte sur 127.0.0.1:3000 (cloudflared géré côté hôte)
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - TZ=Europe/Paris
+      - HOST=0.0.0.0
+      - PORT=3000
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data

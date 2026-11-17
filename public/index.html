@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hextaz Games Week (HGW) — Plateforme Officielle de l'Event</title>
+    <meta
+      name="description"
+      content="Site officiel de la Hextaz Games Week : défis quotidiens personnalisés sur 11 jeux, chasse aux médailles Trackmania (.Replay.gbx), tournois du week-end équilibrés par chapeaux et classement général."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a href="#classement" class="brand" id="brand-link">
+          <div class="brand-mark">HGW</div>
+          <div class="brand-text">
+            <strong>Hextaz Games Week</strong>
+            <span id="cycle-indicator">Semaine Multi-Jeux • Reset 03h00</span>
+          </div>
+        </a>
+
+        <nav class="nav-tabs" aria-label="Navigation principale">
+          <button type="button" class="nav-tab active" data-view="classement" id="tab-classement">
+            🏆 Classement & Lots
+          </button>
+          <button type="button" class="nav-tab" data-view="defis" id="tab-defis">
+            🎯 Défis Quotidiens
+            <span class="nav-badge" id="nav-quests-badge">3/j</span>
+          </button>
+          <button type="button" class="nav-tab" data-view="trackmania" id="tab-trackmania">
+            🏎️ Trackmania (.gbx)
+          </button>
+          <button type="button" class="nav-tab" data-view="tournois" id="tab-tournois">
+            ⚔️ Tournois & Chapeaux
+          </button>
+          <button type="button" class="nav-tab" data-view="admin" id="tab-admin" style="display: none">
+            🛡️ Admin
+            <span class="nav-badge" id="nav-admin-badge">0</span>
+          </button>
+        </nav>
+
+        <div class="auth-zone" id="auth-zone"></div>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- BANNIÈRE PRINCIPALE -->
+      <section class="hero-banner">
+        <div>
+          <h1>1 Semaine. 11 Jeux. Tout se joue jusqu'au Dimanche Soir.</h1>
+          <p class="hero-subtitle">
+            Valide tes <strong>3 défis quotidiens personnalisés</strong> à ton rythme la semaine (15–30 min), chasse les
+            médailles sur le <strong>serveur Trackmania dédié</strong>, et rejoins les
+            <strong>4 grands tournois Live du week-end</strong> avec équipes équilibrées par chapeaux.
+          </p>
+          <div style="display: flex; gap: 0.65rem; flex-wrap: wrap" id="hero-cta-row">
+            <button type="button" class="btn btn-primary" id="hero-go-quests-btn">
+              🎯 Voir mes Défis du Jour
+            </button>
+            <button type="button" class="btn btn-secondary" id="hero-go-tm-btn">
+              🏎️ Déposer un .Replay.gbx
+            </button>
+            <button type="button" class="btn btn-secondary" id="hero-go-tournois-btn">
+              🚗 S'inscrire aux Tournois Live
+            </button>
+          </div>
+        </div>
+
+        <div class="hero-metrics">
+          <div class="metric-box">
+            <div class="metric-label">Barème Équilibré</div>
+            <div class="metric-value">50% / 50%</div>
+            <div class="metric-sub">Semaine Async vs Week-end Live</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Ticket Tombola</div>
+            <div class="metric-value" id="hero-tombola-count">≥ 300 pts</div>
+            <div class="metric-sub" id="hero-tombola-sub">Accessible à tous les joueurs réguliers</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Chrono Hebdo TMNF</div>
+            <div class="metric-value" id="hero-tm-leader">—</div>
+            <div class="metric-sub" id="hero-tm-leader-name">Serveur ouvert 24h/24</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VUE 1 : CLASSEMENT GÉNÉRAL & RÉCOMPENSES -->
+      <section class="view-section active" id="view-classement">
+        <div class="grid-3" style="margin-bottom: 1.5rem">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">🥇 1re Place Générale</span>
+              <span class="badge badge-hard">Champion HGW</span>
+            </div>
+            <p style="font-size: 0.92rem; color: var(--text-secondary)">
+              <strong>Carte Cadeau de 10€ au choix</strong> (Steam, PlayStation, Nintendo, Gacha…) + Rôle & Émote custom
+              sur le serveur Discord.
+            </p>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">🥈 2e & 🥉 3e Places</span>
+              <span class="badge badge-medium">Podium</span>
+            </div>
+            <p style="font-size: 0.92rem; color: var(--text-secondary)">
+              <strong>2e Place :</strong> Abonnement Discord Nitro.<br />
+              <strong>3e Place :</strong> 1 Abonnement (Sub) Twitch au choix.
+            </p>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">🎟️ La Grande Tombola (≥ 300 pts)</span>
+              <span class="badge badge-easy">Dimanche 18h</span>
+            </div>
+            <p style="font-size: 0.92rem; color: var(--text-secondary)">
+              Tous les joueurs atteignant <strong>300 points</strong> sur la semaine décrochent leur ticket pour le
+              tirage au sort final (lot surprise + choix du prochain jeu de soirée).
+            </p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">🏆 Classement Général (`points_ledger`)</h2>
+              <p class="section-desc">
+                Source unique de vérité des points — cumul temps réel des défis quotidiens, médailles TMNF, chrono hebdo
+                et tournois du week-end.
+              </p>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="hgw-table" id="leaderboard-table">
+              <thead>
+                <tr>
+                  <th>Rang</th>
+                  <th>Joueur</th>
+                  <th>Semaine (Async)</th>
+                  <th>Week-end (Live)</th>
+                  <th>Défis / TMNF</th>
+                  <th>Progression Tombola (300 pts)</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody id="leaderboard-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- VUE 2 : DÉFIS QUOTIDIENS PERSONNALISÉS -->
+      <section class="view-section" id="view-defis">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">🎯 Mes 3 Défis Quotidiens Personnalisés</h2>
+            <p class="section-desc">
+              Tirage stratifié chaque nuit à <strong>03h00</strong> : <strong>1 Facile (15 pts)</strong> +
+              <strong>1 Moyen (25 pts)</strong> + <strong>1 Difficile (40 pts)</strong> = <strong>80 pts/jour</strong>
+              potentiels pour tout le monde. Cap de 5 défis validés max par jeu sur la semaine.
+            </p>
+          </div>
+        </div>
+
+        <div id="quests-container" style="margin-bottom: 1.75rem"></div>
+
+        <div class="card">
+          <div class="section-header" style="margin-bottom: 0.5rem">
+            <div>
+              <h3 class="card-title">🎮 Ma Sélection de Jeux (Minimum 4 jeux requis)</h3>
+              <p class="section-desc">
+                Coche les jeux auxquels tu joues. La catégorie <strong>🌐 Fil Rouge / Jeux Web Gratuits</strong> est
+                incluse d'office pour que tout le monde puisse jouer en 5 minutes sur navigateur.
+              </p>
+            </div>
+            <button type="button" class="btn btn-primary" id="save-games-btn">
+              💾 Sauvegarder mes jeux & Générer mes défis
+            </button>
+          </div>
+
+          <div class="games-selector-grid" id="games-selector-grid"></div>
+        </div>
+      </section>
+
+      <!-- VUE 3 : FIL ROUGE TRACKMANIA (.Replay.gbx) -->
+      <section class="view-section" id="view-trackmania">
+        <div class="grid-2" style="margin-bottom: 1.5rem">
+          <div class="card">
+            <div class="card-header">
+              <h2 class="card-title">🏎️ Serveur Dédié Trackmania Nations Forever</h2>
+              <span class="badge badge-easy">100% Gratuit • Sans VPN</span>
+            </div>
+            <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem">
+              Le serveur HGW tourne 24h/24 en mode <strong>TimeAttack</strong> sur la Map de la Semaine jusqu'au samedi
+              20h30, puis passe en mode <strong>Cup Live (12 courses max)</strong> samedi de 21h00 à 21h30.
+            </p>
+            <div
+              style="
+                background: var(--bg-elevated);
+                padding: 0.85rem 1rem;
+                border-radius: var(--radius-md);
+                border: 1px solid var(--border-subtle);
+                margin-bottom: 1rem;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 0.5rem;
+              "
+            >
+              <div>
+                <div style="font-size: 0.74rem; color: var(--text-muted)">TUNNEL DIRECT PLAYIT.GG (TCP+UDP)</div>
+                <div class="mono" style="font-weight: 700; font-size: 0.95rem" id="tmnf-playit-addr">
+                  hgw-tmnf.playit.gg:2350
+                </div>
+              </div>
+              <div style="display: flex; gap: 0.5rem">
+                <a href="tmtp://#join=hgw_stadium_2026" class="btn btn-primary btn-sm" id="tmnf-join-link">
+                  🚀 Rejoindre en 1 clic
+                </a>
+              </div>
+            </div>
+            <p style="font-size: 0.8rem; color: var(--text-muted)">
+              💡 Astuce : En fin de course dans Trackmania, clique sur <strong>« Sauver le Replay »</strong>. Il se
+              trouve dans <code>Documents/TrackMania/Tracks/Replays/</code>.
+            </p>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h2 class="card-title">📤 Vérificateur Automatique `.Replay.gbx`</h2>
+              <span class="badge badge-hard">Anti-Triche SHA-256 + XML</span>
+            </div>
+            <p style="font-size: 0.88rem; color: var(--text-secondary); margin-bottom: 0.85rem">
+              Dépose ton fichier <code>.Replay.gbx</code> (Map de la Semaine ou l'une des 8 maps Médailles). Le site
+              extrait l'UID, vérifie le binaire, ton login TMNF et crédite tes points instantanément.
+            </p>
+
+            <form id="gbx-upload-form">
+              <label for="gbx-file-input" class="gbx-dropzone" id="gbx-dropzone">
+                <div style="font-size: 1.5rem; margin-bottom: 0.3rem">🏁</div>
+                <div style="font-weight: 600" id="gbx-file-label">
+                  Glisse ton fichier .Replay.gbx ici ou clique pour parcourir
+                </div>
+                <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.25rem">
+                  Validation instantanée des médailles Auteur (30 pts), Or (20 pts), Argent (10 pts), Bronze (5 pts)
+                </div>
+                <input
+                  type="file"
+                  id="gbx-file-input"
+                  name="replay"
+                  accept=".gbx"
+                  style="display: none"
+                />
+              </label>
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.85rem; gap: 0.5rem; flex-wrap: wrap">
+                <button type="submit" class="btn btn-emerald" id="gbx-submit-btn">
+                  ⚡ Analyser & Valider mon Replay (.gbx)
+                </button>
+                <a
+                  href="/api/tmnf/sample-replay/medal_1"
+                  class="btn btn-secondary btn-sm"
+                  id="download-sample-gbx-btn"
+                >
+                  🧪 Télécharger un .Replay.gbx d'exemple (A01)
+                </a>
+              </div>
+            </form>
+            <div id="gbx-result-banner" style="margin-top: 0.85rem"></div>
+          </div>
+        </div>
+
+        <div class="grid-2">
+          <!-- TOP 10 CHRONO DE LA SEMAINE -->
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3 class="card-title">⏱️ Chrono de la Semaine — Top 10 Récompensé</h3>
+                <p class="section-desc">
+                  Barème samedi 20h30 : 1er = 150 pts | 2e = 110 pts | 3e = 80 pts | 4e-6e = 50 pts | 7e-10e = 30 pts
+                </p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="hgw-table">
+                <thead>
+                  <tr>
+                    <th>Rang</th>
+                    <th>Pilote</th>
+                    <th>Meilleur Temps</th>
+                    <th>Points Projetés</th>
+                  </tr>
+                </thead>
+                <tbody id="weekly-tmnf-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 8 MAPS CHASSE AUX MÉDAILLES -->
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3 class="card-title">🏅 Chasse aux Médailles (8 Maps Officielles — Max 240 pts)</h3>
+                <p class="section-desc">
+                  Non-cumulatif par map : améliorer une médaille crédite automatiquement la différence de points.
+                </p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="hgw-table">
+                <thead>
+                  <tr>
+                    <th>Piste</th>
+                    <th>Seuil Auteur (30)</th>
+                    <th>Seuil Or (20)</th>
+                    <th>Mon Temps</th>
+                    <th>Points</th>
+                  </tr>
+                </thead>
+                <tbody id="medals-tmnf-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- VUE 4 : TOURNOIS DU WEEK-END & TIRAGE CHAPEAUX -->
+      <section class="view-section" id="view-tournois">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">⚔️ Les 4 Grands Tournois Live du Week-end</h2>
+            <p class="section-desc">
+              Inscris-toi en 1 clic aux tournois auxquels tu penses participer. Pour les tournois en équipe (comme
+              <strong>Rocket League Rumble</strong>), les joueurs présents au check-in sont répartis par
+              <strong>Chapeaux de niveau (Chapeau 1 / 2 / 3)</strong> pour former des équipes 100% équilibrées !
+            </p>
+          </div>
+          <button type="button" class="btn btn-primary" id="stream-reveal-rl-btn">
+            🎬 Révéler les Équipes RL Rumble (Animation Stream)
+          </button>
+        </div>
+
+        <div id="stream-reveal-stage" style="display: none; margin-bottom: 1.5rem" class="card"></div>
+
+        <div class="grid-2" id="tournaments-grid"></div>
+      </section>
+
+      <!-- VUE 5 : BACK-OFFICE ADMIN -->
+      <section class="view-section" id="view-admin">
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">🛡️ Back-Office Organisateur HGW</h2>
+            <p class="section-desc">
+              Validation des preuves en 1 clic, attribution des Chapeaux (Pool 1/2/3), tirage équilibré en direct et
+              calculateur officiel des 5 parties de Fall Guys.
+            </p>
+          </div>
+          <div style="display: flex; gap: 0.6rem; flex-wrap: wrap">
+            <button type="button" class="btn btn-emerald btn-sm" id="admin-seed-demo-btn">
+              ✨ Peupler 12 Joueurs de Démo (Test Complet)
+            </button>
+            <button type="button" class="btn btn-secondary btn-sm" id="admin-cron-btn">
+              ⏰ Simuler le Reset 03h00
+            </button>
+          </div>
+        </div>
+
+        <!-- FILE D'ATTENTE DES PREUVES -->
+        <div class="card" style="margin-bottom: 1.5rem">
+          <div class="card-header">
+            <h3 class="card-title">🕵️ Preuves en attente de validation (`#preuves`)</h3>
+          </div>
+          <div id="admin-proofs-list"></div>
+        </div>
+
+        <div class="grid-2">
+          <!-- GESTION CHAPEAUX & TIRAGE ÉQUIPES -->
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">🎩 Gestion des Chapeaux (Pool 1/2/3) & Tirage Équipes</h3>
+              <select class="select-field" id="admin-tournament-select" style="width: auto">
+                <option value="rl_rumble">🚗 Rocket League RUMBLE (3v3)</option>
+                <option value="brawlhalla">🥊 Brawlhalla</option>
+                <option value="tmnf_cup">🏎️ Cup TMNF Live</option>
+                <option value="fall_guys">🫘 Fall Guys</option>
+              </select>
+            </div>
+            <p style="font-size: 0.84rem; color: var(--text-secondary); margin-bottom: 0.85rem">
+              Classe chaque inscrit dans un Chapeau (1 = Tryhard, 2 = Intermédiaire, 3 = Chill), coche les joueurs
+              présents en vocal (Check-in), puis lance le tirage équilibré.
+            </p>
+            <div style="display: flex; gap: 0.6rem; margin-bottom: 1rem; flex-wrap: wrap">
+              <button type="button" class="btn btn-primary btn-sm" id="admin-draw-teams-btn">
+                🎲 Tirer des Équipes Équilibrées (Check-in)
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm" id="admin-draw-discord-btn">
+                📢 Tirer & Publier dans Discord
+              </button>
+            </div>
+            <div class="table-wrap">
+              <table class="hgw-table">
+                <thead>
+                  <tr>
+                    <th>Joueur</th>
+                    <th>Chapeau (Niveau)</th>
+                    <th>Check-in Vocal</th>
+                    <th>Équipe Assignée</th>
+                  </tr>
+                </thead>
+                <tbody id="admin-pools-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- CALCULATEUR FALL GUYS (5 PARTIES) -->
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">🫘 Calculateur Officiel Fall Guys (Cumul des 5 Parties)</h3>
+              <button type="button" class="btn btn-emerald btn-sm" id="admin-save-fg-btn">
+                💾 Calculer le Classement & Créditer les Points HGW
+              </button>
+            </div>
+            <p style="font-size: 0.84rem; color: var(--text-secondary); margin-bottom: 0.85rem">
+              Sous-barème par partie : <strong>Couronne (Top 1) = 10 pts</strong> | <strong>Finaliste = 6 pts</strong> |
+              <strong>Qualifié Manche 1 = 3 pts</strong> | <strong>Éliminé Manche 1 = 1 pt</strong>. Le cumul des 5
+              parties attribue automatiquement les points HGW (200 / 140 / 90 / 50 / 25).
+            </p>
+            <div class="table-wrap">
+              <table class="hgw-table">
+                <thead>
+                  <tr>
+                    <th>Joueur</th>
+                    <th>G1</th>
+                    <th>G2</th>
+                    <th>G3</th>
+                    <th>G4</th>
+                    <th>G5</th>
+                    <th>Total</th>
+                    <th>Pts HGW</th>
+                  </tr>
+                </thead>
+                <tbody id="admin-fg-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- MODALE SOUMISSION DE PREUVE -->
+    <div class="modal-backdrop" id="proof-modal">
+      <div class="modal-box">
+        <div class="card-header">
+          <h3 class="card-title" id="proof-modal-title">Envoyer ma preuve</h3>
+          <button type="button" class="btn btn-secondary btn-sm" id="proof-modal-close">✕</button>
+        </div>
+        <p style="font-size: 0.86rem; color: var(--text-secondary); margin-bottom: 1rem" id="proof-modal-hint"></p>
+        <form id="proof-submit-form">
+          <input type="hidden" id="proof-assignment-id" />
+          <div style="margin-bottom: 0.9rem">
+            <label style="display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.35rem">
+              Option 1 : Upload d'un Screenshot (≤ 10 Mo) ou Clip court (≤ 20 Mo)
+            </label>
+            <input
+              type="file"
+              id="proof-file-input"
+              name="proofFile"
+              class="input-field"
+              accept="image/*,video/*"
+            />
+          </div>
+          <div style="margin-bottom: 0.9rem">
+            <label style="display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.35rem">
+              Option 2 : Lien externe (Medal.tv, YouTube, Clip Twitch, Streamable, Replay Showdown)
+            </label>
+            <input
+              type="url"
+              id="proof-url-input"
+              name="proofUrl"
+              class="input-field"
+              placeholder="https://medal.tv/..."
+            />
+          </div>
+          <div style="margin-bottom: 1.15rem">
+            <label style="display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.35rem">
+              Commentaire optionnel pour les modos
+            </label>
+            <input
+              type="text"
+              id="proof-note-input"
+              name="proofNote"
+              class="input-field"
+              placeholder="Ex: Score 215 au bowling / Temps 0:23.45"
+            />
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 0.6rem">
+            <button type="button" class="btn btn-secondary" id="proof-modal-cancel">Annuler</button>
+            <button type="submit" class="btn btn-primary">🚀 Envoyer dans #preuves</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- MODALE CONNEXION RAPIDE (MODE DEV / DEMO) -->
+    <div class="modal-backdrop" id="login-modal">
+      <div class="modal-box">
+        <div class="card-header">
+          <h3 class="card-title">🎮 Connexion Hextaz Games Week</h3>
+          <button type="button" class="btn btn-secondary btn-sm" id="login-modal-close">✕</button>
+        </div>
+        <p style="font-size: 0.88rem; color: var(--text-secondary); margin-bottom: 1rem">
+          Connecte-toi en 1 clic avec ton compte Discord (ou utilise la simulation locale si les clés OAuth2 ne sont pas
+          encore renseignées dans <code>.env</code>).
+        </p>
+        <div style="margin-bottom: 1.2rem">
+          <a href="/api/auth/discord" class="btn btn-primary" style="width: 100%" id="oauth-discord-link">
+            🔗 Se connecter avec Discord (OAuth2)
+          </a>
+        </div>
+        <div id="dev-login-section" style="border-top: 1px solid var(--border-subtle); padding-top: 1rem">
+          <div style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.6rem; text-transform: uppercase">
+            Mode Test / Simulation Locale
+          </div>
+          <form id="dev-login-form" style="display: flex; flex-direction: column; gap: 0.75rem">
+            <input
+              type="text"
+              id="dev-login-username"
+              class="input-field"
+              value="Hextaz"
+              placeholder="Ton pseudo Discord"
+              required
+            />
+            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; cursor: pointer">
+              <input type="checkbox" id="dev-login-admin" checked />
+              Activer les droits Organisateur (Admin : Chapeaux, Validation Preuves & Tirage)
+            </label>
+            <button type="submit" class="btn btn-emerald">⚡ Connexion Instantanée</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
