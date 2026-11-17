@@ -75,7 +75,7 @@ function renderAll() {
     live: '🟢 EN COURS (Semaine & Tournois)',
     closed: '🏁 Événement Clôturé',
   };
-  const phaseLabel = phaseMap[appState.eventSettings?.computed_phase] || '🟢 EN COURS';
+  const phaseLabel = phaseMap[appState.eventSettings?.effective_phase] || '🟢 EN COURS';
   document.getElementById('cycle-indicator').textContent = `${phaseLabel} • Cycle ${appState.dayKey}`;
 
   const adminTab = document.getElementById('tab-admin');
@@ -1019,7 +1019,7 @@ function renderAdmin() {
         live: { text: '🟢 Phase : EN COURS (Live)', cls: 'badge-easy' },
         closed: { text: '🏁 Phase : Clôturée', cls: 'badge-hard' },
       };
-      const b = mapBadge[cfg.computed_phase] || mapBadge.live;
+      const b = mapBadge[cfg.effective_phase] || mapBadge.live;
       badgeEl.className = `badge ${b.cls}`;
       badgeEl.textContent = b.text;
     }
