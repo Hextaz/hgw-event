@@ -33,6 +33,21 @@ Conformément aux documents de cadrage ([`docs/spec_zlan_event.md`](docs/spec_zl
 
 ---
 
+## 🎨 Design system
+
+L'interface suit le design system HGW v2 (thème sombre unique, or réservé aux points et à l'action principale, icônes au trait, chiffres en JetBrains Mono). Les tokens et composants `hgw-*` vivent dans `public/styles.css`.
+
+- **Vues routées par URL** : `/` (Aujourd'hui), `/classement`, `/trackmania`, `/tournois`, `/aide`.
+- **Back-office** : `/admin` (modération), `/admin/evenement`, `/admin/tournois`, `/admin/points`, `/admin/maintenance`.
+- **Modération au clavier** : `V` valider, `R` refuser (puis `1`–`5` pour un motif), `→` passer, `Espace` agrandir. Chaque décision peut être annulée pendant 5 s.
+- **Overlay OBS** : `/overlay.html?pos=tr&compact=1`.
+
+## 🔒 Sécurité en production
+
+- `ALLOW_DEV_LOGIN` doit rester à `false` : le mode démo (connexion de test, joueurs fictifs, replays d'exemple) est fermé par défaut quand `NODE_ENV=production`.
+- `TMNF_WEBHOOK_SECRET` doit être défini, identique dans le bridge XML-RPC du serveur Trackmania.
+- Définir un `SESSION_SECRET` long et aléatoire.
+
 ## 🚀 Déploiement sur `VM100` (`/opt/homelab/hgw-event`)
 
 ```bash
@@ -57,5 +72,5 @@ chmod +x infra/tmnf-lxc-setup.sh
 ```bash
 npm install
 npm test        # Exécute la suite de tests (Quinzaine 12j, Régularité, S1/S2 TMNF, Parser .gbx, Chapeaux, Fall Guys)
-npm run dev     # Lance le serveur sur http://127.0.0.1:3000 avec le mode Démo activé
+npm run dev     # Lance le serveur sur http://127.0.0.1:3000 (mode démo actif tant que DISCORD_CLIENT_ID est vide)
 ```

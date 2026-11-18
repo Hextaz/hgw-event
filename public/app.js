@@ -1,2131 +1,1834 @@
-let appState = null;
-let selectedGameIds = new Set();
-let gamesDrawerOpen = false;
-let pastedProofFile = null;
-let selectedGbxFiles = [];
-let streamRevealQueue = [];
-let streamRevealIndex = 0;
-let leaderboardSearch = '';
-let leaderboardFilter = 'all';
-let tombolaSpinning = false;
+// HGW — application joueur et back-office (design system v2).
+// Vanilla JS, aucune dépendance. Les vues sont routées par URL (history API) ;
+// le serveur renvoie index.html pour toute route inconnue.
 
-function showToast(message) {
-  const container = document.getElementById('toast-container');
-  const el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = message;
-  container.appendChild(el);
-  setTimeout(() => el.remove(), 4200);
+// ============================================================================
+// ÉTAT
+// ============================================================================
+let appState = null;
+let route = { view: 'today', pane: 'moderation' };
+let selectedGameIds = new Set();
+let gamesDirty = false;
+let leaderboardFilter = 'all';
+let leaderboardSearch = '';
+let leaderboardExpanded = false;
+const LB_LIMIT = 20;
+let adminTourneyId = 'rl_rumble';
+let settingsDirty = false;
+let reviewIndex = 0;
+const decidedProofs = new Set(); // preuves traitées localement (en attente d'envoi ou envoyées)
+const pendingDecisions = new Map(); // id -> { timer, send }
+let stageQueue = [];
+let stageIndex = 0;
+let tombolaSpinning = false;
+let sseConnected = false;
+let fetchTimer = null;
+
+const REPLAYS_PATH = '%USERPROFILE%\\Documents\\TrackMania\\Tracks\\Replays\\Replays';
+const REJECT_REASONS = [
+  'La capture ne montre pas ton pseudo.',
+  'Le résultat demandé n’est pas visible.',
+  'Capture coupée ou illisible : renvoie l’écran de fin complet.',
+  'Preuve d’une autre partie ou antérieure au défi.',
+  'Lien inaccessible : vérifie qu’il est public.',
+];
+const MEDAL_LABEL = { author: 'Auteur', gold: 'Or', silver: 'Argent', bronze: 'Bronze', none: 'Aucune' };
+const PLACEMENTS = [
+  ['', '—'],
+  ['1', '1er'],
+  ['2', '2e'],
+  ['3', '3e – 4e'],
+  ['5', '5e – 8e'],
+  ['9', 'Participation'],
+];
+
+// ============================================================================
+// ICÔNES (au trait, 24 px, style Lucide — ISC)
+// ============================================================================
+const ICONS = {
+  home: '<path d="M3 11 12 3l9 8"/><path d="M5 9.5V21h14V9.5"/>',
+  trophy: '<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0V4Z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>',
+  flag: '<path d="M5 21V4"/><path d="M5 4h11l-2 4 2 4H5"/>',
+  swords: '<path d="M14.5 17.5 3 6V3h3l11.5 11.5"/><path d="M13 19l6-6M16 16l4 4M19 21l2-2"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  upload: '<path d="M12 15V3M7 8l5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
+  download: '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  dice: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1"/><circle cx="15.5" cy="15.5" r="1"/><circle cx="15.5" cy="8.5" r="1"/><circle cx="8.5" cy="15.5" r="1"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5v.01"/>',
+  tv: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M8 21h8"/>',
+  external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  alert: '<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  flame: '<path d="M12 22c4 0 7-3 7-7 0-4-3-6-4-10-2 2-3 4-3 6-1-1-2-2-2-4-2 2-5 5-5 8 0 4 3 7 7 7Z"/>',
+  ticket: '<path d="M3 8a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-2a2 2 0 0 0 0-4V8Z"/><path d="M13 6v12"/>',
+  target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+  gift: '<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13M19 12v9H5v-9M7.5 8a2.5 2.5 0 0 1 0-5C10 3 12 8 12 8s2-5 4.5-5a2.5 2.5 0 0 1 0 5"/>',
+  wrench: '<path d="M14.7 6.3a4 4 0 0 0 5 5L22 14l-8 8-2.3-2.3a4 4 0 0 0-5-5L2 10l8-8 2.3 2.3a4 4 0 0 0 2.4 2Z"/>',
+  lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  play: '<path d="M6 4l14 8-14 8V4Z"/>',
+  zap: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z"/>',
+  medal: '<circle cx="12" cy="15" r="6"/><path d="M8.5 10.5 6 3h4l2 5 2-5h4l-2.5 7.5"/>',
+};
+function icon(name, cls = 'i') {
+  const d = ICONS[name] || ICONS.info;
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+}
+function hydrateIcons(root = document) {
+  root.querySelectorAll('[data-icon]').forEach((el) => {
+    el.outerHTML = icon(el.dataset.icon);
+  });
 }
 
-function escapeHtml(str) {
+// ============================================================================
+// OUTILS
+// ============================================================================
+const $ = (id) => document.getElementById(id);
+
+function esc(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function formatDeltaSeconds(msDiff) {
-  const sec = (msDiff / 1000).toFixed(3);
-  return msDiff > 0 ? `+${sec}s` : `${sec}s`;
+// Les emoji restent sur Discord : on les retire des textes venant du serveur.
+function plain(str) {
+  return String(str ?? '')
+    .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]/gu, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
-function switchView(viewName) {
-  document.querySelectorAll('.nav-tab').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.view === viewName);
-  });
-  document.querySelectorAll('.view-section').forEach((sec) => {
-    sec.classList.toggle('active', sec.id === `view-${viewName}`);
-  });
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+function tName(t) {
+  return plain(t.name).replace(/^Tournoi\s*#?\d+\s*[—–-]\s*/i, '');
 }
 
-/**
- * Compte à rebours en direct jusqu'au prochain tirage de 03h00 (Europe/Paris).
- */
-function updateResetCountdown() {
-  const el = document.getElementById('live-reset-countdown');
-  if (!el) return;
+function trackName(m) {
+  const n = plain(m.name).replace(m.code, '').trim();
+  return n.replace(/^\((.*)\)$/, '$1') || m.code;
+}
 
-  const now = new Date();
-  const parisStr = now.toLocaleString('en-US', { timeZone: 'Europe/Paris' });
-  const parisNow = new Date(parisStr);
-  const nextReset = new Date(parisNow);
-  nextReset.setHours(3, 0, 0, 0);
-  if (parisNow >= nextReset) {
-    nextReset.setDate(nextReset.getDate() + 1);
+function fmt(n) {
+  return Number(n || 0).toLocaleString('fr-FR');
+}
+
+function signed(n) {
+  return n > 0 ? `+${fmt(n)}` : n < 0 ? `−${fmt(Math.abs(n))}` : '0';
+}
+
+function initials(name) {
+  return (
+    String(name || '?')
+      .replace(/[^\p{L}\p{N} ]/gu, '')
+      .trim()
+      .split(/\s+/)
+      .map((w) => w[0])
+      .join('')
+      .slice(0, 2)
+      .toUpperCase() || '?'
+  );
+}
+
+function avatar(user, size = '') {
+  const src = user?.avatar && /^https?:\/\//.test(user.avatar) ? user.avatar : null;
+  if (src) return `<img class="hgw-avatar ${size}" src="${esc(src)}" alt="" loading="lazy" />`;
+  return `<span class="hgw-avatar ${size}" aria-hidden="true">${esc(initials(user?.display_name))}</span>`;
+}
+
+function monogram(game, small = false) {
+  const label = game?.short_name || game?.name || game?.game_name || '?';
+  const letters = label
+    .replace(/[^\p{L}\p{N} ]/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+  return `<span class="monogram ${small ? 'monogram--sm' : ''}" aria-hidden="true">${esc(letters || '?')}</span>`;
+}
+
+function deltaSec(ms) {
+  const s = (Math.abs(ms) / 1000).toFixed(3);
+  return ms < 0 ? `−${s}` : `+${s}`;
+}
+
+function timeAgo(iso) {
+  if (!iso) return '';
+  const t = Date.parse(String(iso).includes('T') || String(iso).endsWith('Z') ? iso : `${String(iso).replace(' ', 'T')}Z`);
+  if (!Number.isFinite(t)) return '';
+  const min = Math.round((Date.now() - t) / 60000);
+  if (min < 1) return 'à l’instant';
+  if (min < 60) return `il y a ${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 24) return `il y a ${h} h`;
+  return `il y a ${Math.round(h / 24)} j`;
+}
+
+function fmtDate(local) {
+  if (!local) return '';
+  const d = new Date(local);
+  if (Number.isNaN(d.getTime())) return local;
+  return d.toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+async function api(url, opts = {}) {
+  const init = { ...opts };
+  if (opts.json !== undefined) {
+    init.method = init.method || 'POST';
+    init.headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    init.body = JSON.stringify(opts.json);
+    delete init.json;
   }
-
-  const diffSec = Math.max(0, Math.floor((nextReset.getTime() - parisNow.getTime()) / 1000));
-  const h = String(Math.floor(diffSec / 3600)).padStart(2, '0');
-  const m = String(Math.floor((diffSec % 3600) / 60)).padStart(2, '0');
-  const s = String(diffSec % 60).padStart(2, '0');
-  el.textContent = `${h}h ${m}m ${s}s`;
+  try {
+    const res = await fetch(url, init);
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
+    return { ok: res.ok, status: res.status, data };
+  } catch {
+    return { ok: false, status: 0, data: { error: 'Connexion au serveur impossible. Réessaie dans un instant.' } };
+  }
 }
 
+function copyText(text, label) {
+  navigator.clipboard?.writeText(text);
+  toast({ title: label || 'Copié', text, type: 'success' });
+}
+
+// ============================================================================
+// TOASTS
+// ============================================================================
+function toast({ title, text = '', type = 'info', action = null, duration }) {
+  const box = $('toasts');
+  while (box.children.length >= 3) box.firstElementChild.remove();
+  const el = document.createElement('div');
+  const glyph = { success: '✓', danger: '!', points: '+', info: 'i' }[type] || 'i';
+  el.className = `hgw-toast hgw-toast--${type}`;
+  el.setAttribute('role', type === 'danger' ? 'alert' : 'status');
+  el.innerHTML = `
+    <span class="hgw-toast__icon" aria-hidden="true">${glyph}</span>
+    <div class="hgw-toast__body">
+      <div class="hgw-toast__title">${esc(title)}</div>
+      ${text ? `<div class="hgw-toast__text">${esc(text)}</div>` : ''}
+      ${action ? `<button type="button" class="hgw-toast__action">${esc(action.label)}</button>` : ''}
+    </div>
+    <button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--icon hgw-btn--sm" aria-label="Fermer la notification">${icon('x')}</button>`;
+  const remove = () => el.remove();
+  el.querySelector('[aria-label="Fermer la notification"]').addEventListener('click', remove);
+  if (action) {
+    el.querySelector('.hgw-toast__action').addEventListener('click', () => {
+      action.fn();
+      remove();
+    });
+  }
+  box.appendChild(el);
+  const ms = duration ?? (type === 'danger' ? 9000 : 5000);
+  if (ms > 0) setTimeout(remove, ms);
+}
+
+function toastError(data, fallback = 'Une erreur est survenue.') {
+  toast({ title: plain(data?.error) || fallback, type: 'danger' });
+}
+
+// ============================================================================
+// ROUTAGE
+// ============================================================================
+const ROUTES = {
+  '/': { view: 'today' },
+  '/classement': { view: 'classement' },
+  '/trackmania': { view: 'trackmania' },
+  '/tournois': { view: 'tournois' },
+  '/aide': { view: 'aide' },
+  '/admin': { view: 'admin', pane: 'moderation' },
+  '/admin/evenement': { view: 'admin', pane: 'evenement' },
+  '/admin/tournois': { view: 'admin', pane: 'tournois' },
+  '/admin/points': { view: 'admin', pane: 'points' },
+  '/admin/maintenance': { view: 'admin', pane: 'maintenance' },
+};
+const LEGACY_HASH = { '#classement': '/classement', '#defis': '/', '#trackmania': '/trackmania', '#tournois': '/tournois', '#guide': '/aide', '#admin': '/admin' };
+
+function resolveRoute(pathname) {
+  const clean = pathname.replace(/\/+$/, '') || '/';
+  return ROUTES[clean] ? { path: clean, ...ROUTES[clean] } : { path: '/', ...ROUTES['/'] };
+}
+
+function navigate(path, { replace = false } = {}) {
+  const r = resolveRoute(path);
+  if (replace) history.replaceState({}, '', r.path);
+  else if (location.pathname !== r.path) history.pushState({}, '', r.path);
+  applyRoute(r);
+  window.scrollTo({ top: 0 });
+}
+
+function applyRoute(r) {
+  if (r.view === 'admin' && appState && appState.user?.is_admin !== 1) {
+    history.replaceState({}, '', '/');
+    r = { path: '/', ...ROUTES['/'] };
+  }
+  route = { view: r.view, pane: r.pane || 'moderation' };
+  document.querySelectorAll('.view').forEach((s) => s.classList.toggle('is-active', s.id === `view-${route.view}`));
+  document.querySelectorAll('.admin-pane').forEach((p) => p.classList.toggle('is-active', p.id === `pane-${route.pane}`));
+  const titles = { today: 'Aujourd’hui', classement: 'Classement', trackmania: 'Trackmania', tournois: 'Tournois', aide: 'Aide', admin: 'Organisation' };
+  document.title = `${titles[route.view] || 'Accueil'} · Hextaz Games Week`;
+  if (appState) {
+    renderNav();
+    if (route.view === 'admin') renderAdmin();
+  }
+}
+
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-link]');
+  if (!a || e.metaKey || e.ctrlKey || e.shiftKey || a.target === '_blank') return;
+  e.preventDefault();
+  navigate(new URL(a.href).pathname);
+});
+window.addEventListener('popstate', () => applyRoute(resolveRoute(location.pathname)));
+
+// ============================================================================
+// PHASES & TEMPS
+// ============================================================================
+function parisNow() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris' }));
+}
+
+function resetCountdown() {
+  const now = parisNow();
+  const next = new Date(now);
+  next.setHours(3, 0, 0, 0);
+  if (now >= next) next.setDate(next.getDate() + 1);
+  const sec = Math.max(0, Math.floor((next - now) / 1000));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h} h ${String(m).padStart(2, '0')}` : `${m} min`;
+}
+
+function phaseInfo() {
+  const s = appState?.eventSettings || {};
+  const startMs = Date.parse(s.start_at);
+  const day = Number.isFinite(startMs) ? Math.floor((parisNow() - new Date(s.start_at)) / 86400000) + 1 : null;
+  let key = 'act1';
+  if (s.effective_phase === 'registration') key = 'registration';
+  else if (s.effective_phase === 'closed') key = 'closed';
+  else if (s.effective_phase === 'week2') key = day !== null && day >= 13 ? 'finale' : 'act2';
+  const labels = { registration: 'Inscriptions', act1: 'Acte I', act2: 'Acte II', finale: 'Finale', closed: 'Terminé' };
+  return { key, label: labels[key], day: day !== null ? Math.max(1, Math.min(14, day)) : null, manual: s.status_mode && s.status_mode !== 'auto' };
+}
+
+function renderPhaseChip() {
+  const p = phaseInfo();
+  const text = $('phase-chip-text');
+  if (p.key === 'registration') text.innerHTML = `<b>Inscriptions</b> · début ${esc(fmtDate(appState.eventSettings.start_at))}`;
+  else if (p.key === 'closed') text.innerHTML = `<b>Événement terminé</b>`;
+  else text.innerHTML = `<b>${p.label}</b>${p.day ? ` · J${p.day}` : ''} · nouveaux défis dans ${resetCountdown()}`;
+  $('live-dot').classList.toggle('off', !sseConnected);
+  $('live-dot').title = sseConnected ? 'Mises à jour en direct' : 'Reconnexion…';
+}
+
+function phaseTimeline() {
+  const p = phaseInfo();
+  const s = appState.eventSettings || {};
+  const seg = (key, k, t, d, dayFrom, dayTo) => {
+    const order = ['registration', 'act1', 'act2', 'finale', 'closed'];
+    const done = order.indexOf(p.key) > order.indexOf(key);
+    const now = p.key === key;
+    let bar = '';
+    if (now && p.day) {
+      const pct = Math.round(((p.day - dayFrom + 1) / (dayTo - dayFrom + 1)) * 100);
+      bar = `<div class="hgw-phase__bar"><span style="width:${Math.min(100, pct)}%"></span></div>`;
+    }
+    return `<div class="hgw-phase ${done ? 'done' : ''} ${now ? 'now' : ''}">
+      <div class="hgw-phase__k">${k}${now ? ' · en cours' : ''}</div>
+      <div class="hgw-phase__t">${t}</div>
+      <div class="hgw-phase__d">${now && p.day ? `Jour ${p.day} · nouveaux défis dans ${resetCountdown()}` : done ? 'Terminé' : d}</div>
+      ${bar}
+    </div>`;
+  };
+  return `<div class="hgw-phases" aria-label="Étapes de l'événement">
+    ${seg('act1', 'Acte I · J1–J7', 'Défis + 8 pistes solo', `Dès le ${esc(fmtDate(s.start_at))}`, 1, 7)}
+    ${seg('act2', 'Acte II · J8–J12', 'Map serveur ouverte', `Dès le ${esc(fmtDate(s.week2_start_at))}`, 8, 12)}
+    ${seg('finale', 'Finale · J13–J14', '4 tournois live', 'Samedi et dimanche', 13, 14)}
+  </div>`;
+}
+
+// ============================================================================
+// DONNÉES
+// ============================================================================
 async function fetchState() {
-  const res = await fetch('/api/state');
-  appState = await res.json();
-  selectedGameIds = new Set(appState.mySelectedGames || []);
+  const { ok, data } = await api('/api/state');
+  if (!ok) {
+    toastError(data, 'Impossible de charger les données.');
+    return;
+  }
+  appState = data;
+  if (!gamesDirty) selectedGameIds = new Set(appState.mySelectedGames || []);
   renderAll();
+}
+
+function scheduleFetch() {
+  clearTimeout(fetchTimer);
+  fetchTimer = setTimeout(fetchState, 250);
+}
+
+function me() {
+  const lb = appState.leaderboard || [];
+  return lb.find((u) => u.id === appState.user?.id) || null;
 }
 
 function renderAll() {
   if (!appState) return;
-
-  const phaseMap = {
-    registration: '⏳ Inscriptions Ouvertes',
-    week1: '🌱 SEMAINE 1 — Acte I (8 Maps Solo & Défis S1)',
-    week2: '🔥 SEMAINE 2 — Acte II (Serveur 24/7 Débloqué & Finale)',
-    live: '🔥 SEMAINE 2 — Acte II (Serveur 24/7 Débloqué & Finale)',
-    closed: '🏁 Événement Clôturé',
-  };
-  const phaseLabel = phaseMap[appState.eventSettings?.effective_phase] || '🌱 SEMAINE 1';
-  document.getElementById('cycle-indicator').textContent = `${phaseLabel} • Cycle ${appState.dayKey}`;
-
-  const adminTab = document.getElementById('tab-admin');
-  if (appState.user?.is_admin === 1) {
-    adminTab.style.display = 'inline-flex';
-    const pendingCount = appState.admin?.pendingProofs?.length || 0;
-    document.getElementById('nav-admin-badge').textContent = String(pendingCount);
-  } else {
-    adminTab.style.display = 'none';
-  }
-
-  renderAuthZone();
-  renderPersonalStatusBar();
-  renderTwoWeekTimeline();
-  renderPodium();
-  renderLeaderboardAndFeed();
-  renderQuestsAndGames();
+  applyRoute(resolveRoute(location.pathname));
+  renderPhaseChip();
+  renderUser();
+  renderToday();
+  renderLeaderboard();
   renderTrackmania();
   renderTournaments();
-  if (appState.user?.is_admin === 1) {
-    renderAdmin();
-  }
+  if (appState.user?.is_admin === 1) renderAdmin();
 }
 
-function renderTwoWeekTimeline() {
-  const container = document.getElementById('two-week-timeline-bar');
-  if (!container) return;
-  const phase = appState.eventSettings?.effective_phase || 'week1';
-  const isW1 = phase === 'week1';
-  const isW2 = phase === 'week2' || phase === 'live';
-
-  const cardStyle = (active, done) => `
-    background: ${active ? 'linear-gradient(135deg, hsla(43, 96%, 58%, 0.14), var(--bg-surface))' : 'var(--bg-surface)'};
-    border: 1px solid ${active ? 'var(--accent-gold)' : done ? 'hsla(152, 76%, 48%, 0.4)' : 'var(--border-subtle)'};
-    border-radius: var(--radius-md);
-    padding: 0.85rem 1rem;
-    box-shadow: ${active ? 'var(--shadow-glow-gold)' : 'none'};
-  `;
-
-  container.innerHTML = `
-    <div style="${cardStyle(isW1, isW2 || phase === 'closed')}">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">
-        <strong style="font-family:var(--font-display);font-size:0.95rem;">🌱 Semaine 1 — Acte I</strong>
-        <span class="badge ${isW1 ? 'badge-hard' : 'badge-easy'}">${isW1 ? 'EN COURS' : isW2 || phase === 'closed' ? '✓ Complété' : 'À venir'}</span>
-      </div>
-      <div style="font-size:0.8rem;color:var(--text-secondary);">
-        <strong>8 Maps Médailles Solo TMNF</strong> (240 pts max) + Défis Quotidiens Acte I (50 pts/j, 4 défis/jeu).
-      </div>
-    </div>
-
-    <div style="${cardStyle(isW2, phase === 'closed')}">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">
-        <strong style="font-family:var(--font-display);font-size:0.95rem;">🔥 Semaine 2 — Acte II</strong>
-        <span class="badge ${isW2 ? 'badge-hard' : 'badge-medium'}">${isW2 ? '🔓 DÉBLOQUÉ !' : '🔒 Déblocage Lundi S2'}</span>
-      </div>
-      <div style="font-size:0.8rem;color:var(--text-secondary);">
-        <strong>🔓 Map Serveur TMNF 24/7</strong> (150 pts au 1er) + <strong>Nouveaux Défis Acte II</strong> + Reset quota 4 défis/jeu !
-      </div>
-    </div>
-
-    <div style="${cardStyle(false, phase === 'closed')}">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">
-        <strong style="font-family:var(--font-display);font-size:0.95rem;">🏆 Dernier Week-end — Finale Live</strong>
-        <span class="badge badge-easy">Sam. & Dim. S2</span>
-      </div>
-      <div style="font-size:0.8rem;color:var(--text-secondary);">
-        <strong>4 Grands Tournois en Direct</strong> (Brawlhalla, Cup TM, RL Rumble Chapeaux, Fall Guys) + <strong>Grande Tombola</strong>.
-      </div>
-    </div>
-  `;
-}
-
-function renderAuthZone() {
-  const slot = document.getElementById('auth-user-slot');
-  if (!appState.user) {
-    slot.innerHTML = `
-      <button type="button" class="btn btn-primary btn-sm" id="open-login-modal-btn">
-        🎮 Connexion Discord
-      </button>
-    `;
-    document.getElementById('open-login-modal-btn').addEventListener('click', () => {
-      document.getElementById('login-modal').classList.add('open');
-    });
-    return;
-  }
-
-  const meInLb = (appState.leaderboard || []).find((u) => u.id === appState.user.id);
-  const myPts = meInLb ? meInLb.total_points : 0;
-
-  slot.innerHTML = `
-    <div style="display:flex;align-items:center;gap:0.5rem;">
-      <div class="user-chip" id="my-profile-chip" title="Voir le détail de mes points">
-        <span>👤 <strong>${escapeHtml(appState.user.display_name)}</strong></span>
-        <span class="user-chip-pts">${myPts} pts</span>
-      </div>
-      <button type="button" class="btn btn-secondary btn-sm" id="logout-btn" title="Se déconnecter">⏻</button>
-    </div>
-  `;
-
-  document.getElementById('my-profile-chip').addEventListener('click', () => {
-    openPlayerLedgerModal(appState.user.id);
-  });
-
-  document.getElementById('logout-btn').addEventListener('click', async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
-    await fetchState();
-    showToast('Déconnecté.');
-  });
-}
-
-function renderPersonalStatusBar() {
-  const bar = document.getElementById('personal-status-bar');
-  const lb = appState.leaderboard || [];
-  const topTm = appState.weeklyTmnfLeaderboard?.[0];
-
-  if (!appState.user) {
-    bar.innerHTML = `
-      <div style="grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
-        <div>
-          <strong style="font-family: var(--font-display); font-size: 1.15rem;">
-            🔥 Bienvenue sur la Hextaz Games Week (Édition 2 Semaines) !
-          </strong>
-          <p style="font-size: 0.88rem; color: var(--text-secondary); margin-top: 0.15rem;">
-            Connecte-toi avec Discord pour tirer tes <strong>3 défis quotidiens (50 pts/j + 120 pts de Bonus Régularité)</strong>,
-            chasser les 8 maps médailles en Semaine 1, débloquer le Serveur 24/7 en Semaine 2 et viser la <strong>Tombola (300 pts)</strong>.
-          </p>
-        </div>
-        <button type="button" class="btn btn-primary" id="banner-login-btn">
-          🎮 Se connecter & Commencer
-        </button>
-      </div>
-    `;
-    document.getElementById('banner-login-btn').addEventListener('click', () => {
-      document.getElementById('login-modal').classList.add('open');
-    });
-    return;
-  }
-
-  const me = lb.find((u) => u.id === appState.user.id) || {
-    rank: '—',
-    total_points: 0,
-    async_points: 0,
-    live_points: 0,
-    quests_validated: 0,
-    active_days_count: 0,
-    tmnf_medals_count: 0,
-    tombola_eligible: false,
-    tombola_progress_pct: 0,
-  };
-
-  const questsToday = appState.myDailyQuests || [];
-  const doneToday = questsToday.filter((q) => q.status === 'validated').length;
-  const remainingTombola = Math.max(0, appState.tombolaThreshold - me.total_points);
-  const reg = appState.myRegularity || { activeDaysCount: 0, totalBonusPoints: 0 };
-
-  bar.innerHTML = `
-    <div>
-      <div style="font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-gold); font-weight: 700;">
-        Mon Tableau de Bord • ${escapeHtml(appState.user.display_name)}
-      </div>
-      <div style="font-family: var(--font-display); font-size: 1.25rem; font-weight: 700; margin-top: 0.1rem;">
-        Rang #${me.rank} <span style="font-size: 0.88rem; color: var(--text-secondary); font-weight: 500;">sur ${lb.length} joueurs</span>
-      </div>
-      <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.15rem;">
-        Async : <strong class="mono">${me.async_points} pts</strong> • Live : <strong class="mono">${me.live_points} pts</strong>
-      </div>
-    </div>
-
-    <div class="status-stat">
-      <div class="status-stat-label">Points Totaux</div>
-      <div class="status-stat-val" style="color: var(--accent-gold)">${me.total_points} pts</div>
-      <div style="font-size: 0.73rem; color: var(--text-muted)">🔥 Régularité : ${reg.activeDaysCount}/12j (+${reg.totalBonusPoints} pts)</div>
-    </div>
-
-    <div class="status-stat">
-      <div class="status-stat-label">Ticket Tombola (300 pts)</div>
-      <div class="status-stat-val" style="color: ${me.tombola_eligible ? 'var(--accent-emerald)' : 'var(--text-primary)'}">
-        ${me.tombola_eligible ? '🎟️ Qualifié !' : `Encore ${remainingTombola} pts`}
-      </div>
-      <div class="progress-track" style="margin-top: 0.35rem">
-        <div class="progress-fill" style="width: ${me.tombola_progress_pct}%"></div>
-      </div>
-    </div>
-
-    <div class="status-stat">
-      <div class="status-stat-label">Défis du Jour (50 pts)</div>
-      <div class="status-stat-val">${doneToday} / ${questsToday.length || 3} validés</div>
-      <div style="font-size: 0.73rem; color: var(--text-secondary)">
-        ${appState.canRerollToday ? '🎲 1 Reroll dispo' : '✓ Reroll utilisé'}
-      </div>
-    </div>
-
-    <div class="status-stat">
-      <div class="status-stat-label">Chasse Médailles TMNF</div>
-      <div class="status-stat-val">${me.tmnf_medals_count} / 8 pistes</div>
-      <div style="font-size: 0.73rem; color: var(--text-secondary)">
-        ${topTm ? `WR S2 : ${topTm.formatted_time}` : appState.eventSettings?.tmnf_weekly_unlocked ? '🔓 Serveur S2 Ouvert' : '🔒 Serveur en Semaine 2'}
-      </div>
-    </div>
-  `;
-}
-
-function renderPodium() {
-  const grid = document.getElementById('podium-grid');
-  const lb = appState.leaderboard || [];
-  if (lb.length === 0) {
-    grid.innerHTML = '';
-    return;
-  }
-
-  const p1 = lb[0];
-  const p2 = lb[1];
-  const p3 = lb[2];
-  const leaderPts = p1 ? p1.total_points : 0;
-
-  const buildPodiumCard = (player, rank, prizeLabel, badgeLabel) => {
-    if (!player) {
-      return `
-        <div class="podium-card podium-rank-${rank}" style="opacity:0.5;cursor:default;">
-          <div class="card-header">
-            <span class="badge">${badgeLabel}</span>
-          </div>
-          <div style="color:var(--text-muted);font-size:0.9rem;">Place sur le podium disponible</div>
-          <div class="prize-tag">🎁 ${prizeLabel}</div>
-        </div>
-      `;
-    }
-
-    const initials = (player.display_name || 'H').slice(0, 2).toUpperCase();
-    const gap = rank === 1 ? 'Leader HGW' : `-${leaderPts - player.total_points} pts du 1er`;
-    const total = Math.max(1, player.total_points);
-    const asyncPct = Math.round((player.async_points / total) * 100);
-    const livePct = 100 - asyncPct;
-
-    return `
-      <div class="podium-card podium-rank-${rank}" data-inspect-uid="${player.id}">
-        <div>
-          <div class="card-header" style="margin-bottom:0.75rem;">
-            <span class="badge ${rank === 1 ? 'badge-hard' : rank === 2 ? 'badge-medium' : 'badge-easy'}">
-              ${badgeLabel}
-            </span>
-            <span class="mono" style="font-size:0.75rem;color:var(--text-muted);">${gap}</span>
-          </div>
-
-          <div style="display:flex;align-items:center;gap:0.85rem;margin-bottom:0.85rem;">
-            <div class="podium-avatar">${escapeHtml(initials)}</div>
-            <div>
-              <div style="font-family:var(--font-display);font-size:1.2rem;font-weight:700;line-height:1.15;">
-                ${escapeHtml(player.display_name)}
-              </div>
-              <div style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.15rem;">
-                ${player.quests_validated} défis • ${player.tmnf_medals_count}/8 médailles TM
-              </div>
-            </div>
-          </div>
-
-          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.35rem;">
-            <span class="mono" style="font-size:1.5rem;font-weight:700;color:var(--accent-gold);">
-              ${player.total_points} pts
-            </span>
-            <span class="mono" style="font-size:0.74rem;color:var(--text-secondary);">
-              Async ${player.async_points} • Live ${player.live_points}
-            </span>
-          </div>
-
-          <div class="split-bar" title="Semaine Async (${player.async_points} pts) vs Week-end Live (${player.live_points} pts)">
-            <div class="split-bar-async" style="width:${asyncPct}%"></div>
-            <div class="split-bar-live" style="width:${livePct}%"></div>
-          </div>
-        </div>
-
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
-          <span class="prize-tag">🎁 ${prizeLabel}</span>
-          ${player.tombola_eligible ? `<span class="badge badge-easy">🎟️ Tombola</span>` : ''}
-        </div>
-      </div>
-    `;
-  };
-
-  // Ordre visuel classique d'un podium : 2e à gauche, 1er au centre, 3e à droite
-  grid.innerHTML = [
-    buildPodiumCard(p2, 2, 'Discord Nitro', '🥈 2e Place'),
-    buildPodiumCard(p1, 1, 'Carte Cadeau 10€ + Rôle Custom', '🥇 1re Place — Champion'),
-    buildPodiumCard(p3, 3, '1 Sub Twitch', '🥉 3e Place'),
-  ].join('');
-
-  grid.querySelectorAll('[data-inspect-uid]').forEach((card) => {
-    card.addEventListener('click', () => openPlayerLedgerModal(card.dataset.inspectUid));
-  });
-}
-
-function renderLeaderboardAndFeed() {
-  const tbody = document.getElementById('leaderboard-tbody');
-  let rows = [...(appState.leaderboard || [])];
-
-  if (leaderboardSearch.trim() !== '') {
-    const q = leaderboardSearch.trim().toLowerCase();
-    rows = rows.filter(
-      (p) =>
-        (p.display_name || '').toLowerCase().includes(q) ||
-        (p.username || '').toLowerCase().includes(q) ||
-        (p.tmnf_login || '').toLowerCase().includes(q)
-    );
-  }
-
-  if (leaderboardFilter === 'tombola') {
-    rows = rows.filter((p) => p.tombola_eligible);
-  } else if (leaderboardFilter === 'async') {
-    rows.sort((a, b) => b.async_points - a.async_points || b.total_points - a.total_points);
-  } else if (leaderboardFilter === 'live') {
-    rows.sort((a, b) => b.live_points - a.live_points || b.total_points - a.total_points);
-  }
-
-  if (rows.length === 0) {
-    tbody.innerHTML = `
-      <tr>
-        <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">
-          Aucun joueur ne correspond à ce filtre.
-        </td>
-      </tr>
-    `;
-  } else {
-    tbody.innerHTML = rows
-      .map((p) => {
-        const rankBadge =
-          p.rank === 1 ? '🥇 1er' : p.rank === 2 ? '🥈 2e' : p.rank === 3 ? '🥉 3e' : `#${p.rank}`;
-        const total = Math.max(1, p.total_points);
-        const asyncPct = Math.round((p.async_points / total) * 100);
-        const livePct = 100 - asyncPct;
-
-        const tombolaBadge = p.tombola_eligible
-          ? `<span class="badge badge-easy">🎟️ Qualifié (${p.total_points} pts)</span>`
-          : `<div style="display:flex;align-items:center;gap:0.55rem;">
-               <div class="progress-track" style="max-width:110px;">
-                 <div class="progress-fill" style="width:${p.tombola_progress_pct}%"></div>
-               </div>
-               <span class="mono" style="font-size:0.74rem;color:var(--text-muted);">${p.total_points}/300</span>
-             </div>`;
-
-        return `
-          <tr class="clickable-row" data-inspect-uid="${p.id}" title="Cliquer pour voir le détail des points de ${escapeHtml(p.display_name)}">
-            <td class="rank-cell">${rankBadge}</td>
-            <td>
-              <strong>${escapeHtml(p.display_name)}</strong>
-              ${p.tmnf_login ? `<span class="mono" style="font-size:0.7rem;color:var(--text-muted);margin-left:0.35rem;">[${escapeHtml(p.tmnf_login)}]</span>` : ''}
-            </td>
-            <td style="min-width:160px;">
-              <div style="display:flex;justify-content:space-between;font-size:0.74rem;margin-bottom:0.2rem;" class="mono">
-                <span style="color:var(--accent-emerald)">${p.async_points} Async</span>
-                <span style="color:var(--accent-sky)">${p.live_points} Live</span>
-              </div>
-              <div class="split-bar">
-                <div class="split-bar-async" style="width:${asyncPct}%"></div>
-                <div class="split-bar-live" style="width:${livePct}%"></div>
-              </div>
-            </td>
-            <td style="font-size:0.8rem;color:var(--text-secondary);">
-              ${p.quests_validated} défis • ${p.tmnf_medals_count}/8 TM
-            </td>
-            <td>${tombolaBadge}</td>
-            <td class="mono" style="font-weight:700;font-size:1.05rem;color:var(--accent-gold);">
-              ${p.total_points} pts
-            </td>
-          </tr>
-        `;
-      })
-      .join('');
-
-    tbody.querySelectorAll('[data-inspect-uid]').forEach((tr) => {
-      tr.addEventListener('click', () => openPlayerLedgerModal(tr.dataset.inspectUid));
-    });
-  }
-
-  // Render Live Feed
-  const feedEl = document.getElementById('live-feed-list');
-  const feed = appState.recentFeed || [];
-  if (feed.length === 0) {
-    feedEl.innerHTML = `<div style="color:var(--text-muted);font-size:0.84rem;">Aucune activité enregistrée.</div>`;
-  } else {
-    feedEl.innerHTML = feed
-      .map(
-        (item) => `
-        <div class="feed-item">
-          <div>
-            <strong style="color:var(--text-primary);">${escapeHtml(item.display_name)}</strong>
-            <div style="color:var(--text-secondary);font-size:0.78rem;margin-top:0.1rem;">
-              ${escapeHtml(item.label)}
-            </div>
-          </div>
-          <span class="feed-pts">+${item.points} pts</span>
-        </div>
-      `
-      )
-      .join('');
-  }
-}
-
-async function openPlayerLedgerModal(userId) {
-  const res = await fetch(`/api/player/${encodeURIComponent(userId)}/ledger`);
-  if (!res.ok) return;
-  const data = await res.json();
-
-  document.getElementById('player-ledger-title').textContent = `📜 Journal des Points — ${data.player.display_name}`;
-  const gamesBox = document.getElementById('player-ledger-games');
-  gamesBox.innerHTML = (data.selectedGames || [])
-    .map((g) => `<span class="badge badge-medium">${g.emoji} ${escapeHtml(g.short_name)}</span>`)
+// ============================================================================
+// NAVIGATION & MENU UTILISATEUR
+// ============================================================================
+function renderNav() {
+  const openQuests = (appState.myDailyQuests || []).filter((q) => q.status === 'open' || q.status === 'rejected').length;
+  const items = [
+    ['/', 'home', appState.user ? 'Aujourd’hui' : 'Accueil', 'today', appState.user ? openQuests : 0],
+    ['/classement', 'trophy', 'Classement', 'classement', 0],
+    ['/trackmania', 'flag', 'Trackmania', 'trackmania', 0],
+    ['/tournois', 'swords', 'Tournois', 'tournois', 0],
+  ];
+  $('main-nav').innerHTML = items
+    .map(
+      ([href, ic, label, view, count]) => `
+      <a class="hgw-tab" href="${href}" data-link ${route.view === view ? 'aria-current="page"' : ''}>
+        ${icon(ic)}<span>${label}</span>${count ? `<span class="hgw-tab__count" aria-label="${count} à faire">${count}</span>` : ''}
+      </a>`
+    )
     .join('');
-
-  const entriesBox = document.getElementById('player-ledger-entries');
-  if (!data.entries || data.entries.length === 0) {
-    entriesBox.innerHTML = `<div style="color:var(--text-muted);font-size:0.86rem;">Aucun point crédité pour le moment.</div>`;
-  } else {
-    entriesBox.innerHTML = data.entries
-      .map(
-        (e) => `
-        <div class="feed-item">
-          <div>
-            <div style="font-weight:600;color:var(--text-primary);">${escapeHtml(e.label)}</div>
-            <div class="mono" style="font-size:0.72rem;color:var(--text-muted);margin-top:0.15rem;">
-              Catégorie : ${e.category.toUpperCase()} • Réf : ${escapeHtml(e.source_ref)}
-            </div>
-          </div>
-          <span class="feed-pts">${e.points >= 0 ? `+${e.points}` : e.points} pts</span>
-        </div>
-      `
-      )
-      .join('');
-  }
-
-  document.getElementById('player-ledger-modal').classList.add('open');
 }
 
-async function openTrackLeaderboardModal(mapId) {
-  const res = await fetch(`/api/tmnf/map/${encodeURIComponent(mapId)}/leaderboard`);
-  if (!res.ok) return;
-  const data = await res.json();
+function openLogin() {
+  if (appState?.oauthConfigured) {
+    location.href = '/api/auth/discord';
+  } else if (appState?.devMode) {
+    $('dev-login-dialog').showModal();
+  } else {
+    toast({ title: 'Connexion indisponible', text: 'La connexion Discord n’est pas encore configurée.', type: 'danger' });
+  }
+}
+
+function renderUser() {
+  const slot = $('user-slot');
+  if (!appState.user) {
+    slot.innerHTML = `<button type="button" class="hgw-btn hgw-btn--primary hgw-btn--sm" id="topbar-login">Se connecter</button>`;
+    $('topbar-login').addEventListener('click', openLogin);
+    return;
+  }
+  const m = me();
+  const pending = appState.admin ? visibleProofs().length : 0;
+  const isAdmin = appState.user.is_admin === 1;
+  slot.innerHTML = `
+    <div class="usermenu">
+      <button type="button" class="usermenu__btn" id="usermenu-btn" aria-haspopup="menu" aria-expanded="false">
+        ${avatar(appState.user)}
+        <span class="usermenu__name">${esc(appState.user.display_name)}</span>
+        <span class="usermenu__pts">${fmt(m?.total_points)} pts</span>
+        ${isAdmin && pending ? `<span class="hgw-tab__count" aria-label="${pending} preuves à vérifier">${pending}</span>` : ''}
+      </button>
+      <div class="usermenu__list" id="usermenu-list" role="menu" hidden>
+        <button type="button" class="usermenu__item" role="menuitem" data-act="ledger">${icon('list')}Mon historique de points</button>
+        ${isAdmin ? `<a class="usermenu__item" role="menuitem" href="/admin" data-link>${icon('shield')}Organisation${pending ? `<span class="hgw-tab__count">${pending}</span>` : ''}</a>` : ''}
+        <a class="usermenu__item" role="menuitem" href="/aide" data-link>${icon('help')}Aide</a>
+        <div class="usermenu__sep"></div>
+        <button type="button" class="usermenu__item" role="menuitem" data-act="logout">${icon('logout')}Se déconnecter</button>
+      </div>
+    </div>`;
+  const btn = $('usermenu-btn');
+  const list = $('usermenu-list');
+  const close = () => {
+    list.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+  };
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    list.hidden = !list.hidden;
+    btn.setAttribute('aria-expanded', String(!list.hidden));
+  });
+  list.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const item = e.target.closest('[data-act], a');
+    close();
+    if (!item) return;
+    if (item.dataset.act === 'ledger') openLedger(appState.user.id);
+    if (item.dataset.act === 'logout') {
+      await api('/api/auth/logout', { method: 'POST' });
+      navigate('/');
+      await fetchState();
+      toast({ title: 'Tu es déconnecté.', type: 'success' });
+    }
+  });
+}
+
+// ============================================================================
+// AUJOURD'HUI
+// ============================================================================
+function renderToday() {
+  const root = $('view-today');
+  if (!appState.user) {
+    root.innerHTML = renderVisitorHome();
+    root.querySelector('#hero-login')?.addEventListener('click', openLogin);
+    root.querySelector('#hero-dev')?.addEventListener('click', () => $('dev-login-dialog').showModal());
+    return;
+  }
+
+  const quests = appState.myDailyQuests || [];
+  const hasGames = (appState.mySelectedGames || []).length >= 4;
+
+  root.innerHTML = `
+    <div class="view-head">
+      <div>
+        <h1 class="view-title" id="today-title">Salut ${esc(appState.user.display_name)}</h1>
+        <p class="view-desc">${hasGames ? 'Voici ce qui t’attend aujourd’hui.' : 'Coche tes jeux pour recevoir tes premiers défis.'}</p>
+      </div>
+    </div>
+    ${phaseTimeline()}
+    ${appState.eventSettings?.effective_phase === 'closed' ? `<div class="banner banner--gold section">${icon('trophy')}<span>L’événement est terminé : les points sont gelés. Merci d’avoir joué !</span></div>` : ''}
+    ${hasGames ? `<div class="hgw-card section">${renderTonight()}</div>` : ''}
+    <div class="section">
+      <div class="section-head">
+        <h2 class="section-title">Tes défis du jour</h2>
+        ${hasGames ? `<span class="small muted">${appState.canRerollToday ? '1 relance disponible aujourd’hui' : 'Relance utilisée · prochaine demain à 3 h'}</span>` : ''}
+      </div>
+      ${hasGames ? (quests.length ? `<div class="grid-3">${quests.map(questCard).join('')}</div>` : emptyCard('Pas de défi pour l’instant', 'Les défis sont tirés chaque nuit à 3 h.')) : `<div class="banner banner--gold">${icon('target')}<span>Coche au moins <b>4 jeux</b> ci-dessous puis enregistre : tes 3 défis arrivent tout de suite.</span></div>`}
+    </div>
+    ${hasGames ? `<div class="section"><h2 class="section-title">Ta progression</h2>${renderMyStats()}</div>` : ''}
+    <div class="section" id="my-games">${renderGames()}</div>
+  `;
+
+  root.querySelectorAll('[data-proof]').forEach((b) => b.addEventListener('click', () => openProof(Number(b.dataset.proof))));
+  root.querySelectorAll('[data-reroll]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      const { ok, data } = await api(`/api/quests/${b.dataset.reroll}/reroll`, { method: 'POST' });
+      if (!ok) {
+        b.disabled = false;
+        return toastError(data);
+      }
+      toast({ title: 'Défi relancé', text: 'Même difficulté, nouveau défi.', type: 'success' });
+      fetchState();
+    })
+  );
+  root.querySelectorAll('[data-open-ledger]').forEach((b) => b.addEventListener('click', () => openLedger(appState.user.id)));
+  bindGames(root);
+}
+
+function renderVisitorHome() {
+  const lb = (appState.leaderboard || []).slice(0, 5);
+  const canLogin = appState.oauthConfigured || appState.devMode;
+  return `
+    <div class="hgw-card hero">
+      <div>
+        <p class="hgw-stat__label t-gold">Hextaz Games Week</p>
+        <h1 class="hero__title" id="today-title" style="margin-top: var(--space-2)">Deux semaines de défis, de chronos et de tournois.</h1>
+        <p class="hero__lead">Joue à ton rythme, 15 minutes par soir suffisent. Trois défis par jour sur tes jeux, la chasse aux médailles Trackmania, puis quatre tournois live pour finir.</p>
+        <div class="row" style="margin-top: var(--space-6)">
+          ${appState.oauthConfigured ? `<button type="button" class="hgw-btn hgw-btn--primary hgw-btn--lg" id="hero-login">Se connecter avec Discord</button>` : ''}
+          ${appState.devMode ? `<button type="button" class="hgw-btn hgw-btn--${appState.oauthConfigured ? 'ghost' : 'primary hgw-btn--lg'}" id="hero-dev">Connexion de test</button>` : ''}
+          ${!canLogin ? `<span class="small muted">La connexion ouvrira bientôt.</span>` : ''}
+          <a class="hgw-btn hgw-btn--ghost" href="/aide" data-link>Comment ça marche</a>
+        </div>
+      </div>
+      <ol class="hero__steps">
+        <li><span><b>Coche tes jeux</b><span class="muted small">Au moins 4, les jeux web gratuits sont inclus.</span></span></li>
+        <li><span><b>Relève tes 3 défis du jour</b><span class="muted small">Envoie une capture, un orga valide, les points tombent.</span></span></li>
+        <li><span><b>Grimpe au classement</b><span class="muted small">300 points = un ticket pour la tombola du dimanche.</span></span></li>
+      </ol>
+    </div>
+    <div class="section">${phaseTimeline()}</div>
+    <div class="hgw-card section">
+      <div class="hgw-card__head">
+        <div><h2 class="hgw-card__title">En tête du classement</h2></div>
+        <a href="/classement" data-link class="hgw-btn hgw-btn--ghost hgw-btn--sm">Tout le classement</a>
+      </div>
+      ${lb.length ? `<div class="table-wrap"><table class="hgw-table"><tbody>${withTieRanks(lb, 'total_points').map(({ row, rank }) => lbRow(row, rank, false)).join('')}</tbody></table></div>` : `<div class="hgw-empty"><strong>Personne pour l’instant</strong>Sois le premier à marquer des points.</div>`}
+    </div>`;
+}
+
+function renderTonight() {
+  const items = [];
+  const quests = appState.myDailyQuests || [];
+  const rejected = quests.filter((q) => q.status === 'rejected');
+  const open = quests.filter((q) => q.status === 'open');
+  const m = me();
+  const reg = appState.myRegularity || { activeDaysCount: 0, tiers: [] };
+
+  if (rejected.length) items.push(['alert', `<b>${rejected.length} preuve${rejected.length > 1 ? 's' : ''} refusée${rejected.length > 1 ? 's' : ''}</b> à renvoyer`, '']);
+  if (open.length) {
+    const pts = open.reduce((s, q) => s + (q.points || 0), 0);
+    items.push(['target', `<b>${open.length} défi${open.length > 1 ? 's' : ''}</b> à faire`, `+${pts}`]);
+  }
+  const nextTier = (reg.tiers || []).find((t) => !t.unlocked);
+  const activeToday = quests.some((q) => q.status === 'validated');
+  if (nextTier && items.length < 3) {
+    items.push([
+      'flame',
+      activeToday
+        ? `Journée validée · <b>${reg.activeDaysCount}/${nextTier.days} jours</b> pour le palier`
+        : `Valide un défi aujourd’hui pour le palier <b>${nextTier.days} jours</b> (${reg.activeDaysCount}/${nextTier.days})`,
+      `+${nextTier.points}`,
+    ]);
+  }
+  const nextMedal = closestMedal();
+  if (nextMedal && items.length < 3) items.push(['flag', `${nextMedal.label} sur <b>${esc(nextMedal.code)}</b> à ${nextMedal.gap} s`, `+${nextMedal.gain}`]);
+  if (m && !m.tombola_eligible && items.length < 3) items.push(['ticket', `Encore <b>${fmt(appState.tombolaThreshold - m.total_points)} pts</b> pour la tombola`, '']);
+  if (!items.length) items.push(['check', '<b>Tout est fait pour aujourd’hui.</b> Reviens après 3 h pour de nouveaux défis.', '']);
+
+  return `<div class="hgw-card__head" style="margin-bottom: var(--space-3)"><h2 class="hgw-card__title">Ce soir</h2></div>
+    <div class="tonight">${items
+      .slice(0, 3)
+      .map(([ic, txt, gain]) => `<div class="tonight__item">${icon(ic)}<span>${txt}</span>${gain ? `<span class="hgw-badge hgw-badge--points tonight__gain">${gain}</span>` : ''}</div>`)
+      .join('')}</div>`;
+}
+
+function medalSteps(m) {
+  return [
+    { key: 'bronze', ms: m.bronze_ms, pts: 5 },
+    { key: 'silver', ms: m.silver_ms, pts: 10 },
+    { key: 'gold', ms: m.gold_ms, pts: 20 },
+    { key: 'author', ms: m.author_ms, pts: 30 },
+  ];
+}
+
+function closestMedal() {
+  const subs = new Map((appState.myTmnfSubmissions || []).map((s) => [s.map_id, s]));
+  let best = null;
+  for (const m of (appState.tmnfMaps || []).filter((x) => !x.is_weekly)) {
+    const sub = subs.get(m.id);
+    if (!sub) continue;
+    const next = medalSteps(m).find((s) => sub.best_time_ms > s.ms);
+    if (!next) continue;
+    const gapMs = sub.best_time_ms - next.ms;
+    if (!best || gapMs < best.gapMs) {
+      best = { code: m.code, label: MEDAL_LABEL[next.key], gapMs, gap: (gapMs / 1000).toFixed(3).replace('.', ','), gain: next.pts - (sub.best_points || 0) };
+    }
+  }
+  return best && best.gain > 0 ? best : null;
+}
+
+function diffPips(d) {
+  const n = { easy: 1, medium: 2, hard: 3 }[d] || 1;
+  const label = { easy: 'Facile', medium: 'Moyen', hard: 'Difficile' }[d] || d;
+  return `<span class="hgw-diff"><span class="hgw-diff__pips" aria-hidden="true">${[1, 2, 3].map((i) => `<i class="${i <= n ? 'on' : ''}"></i>`).join('')}</span>${label}</span>`;
+}
+
+function questCard(q) {
+  const cap = appState.maxWeeklyQuestsPerGame || 4;
+  const used = appState.myWeeklyGameCounts?.[q.game_id] || 0;
+  const game = (appState.games || []).find((g) => g.id === q.game_id) || { short_name: q.game_name };
+  const states = {
+    open: { cls: '', badge: `<span class="hgw-badge hgw-badge--points">+${q.points}</span>` },
+    submitted: { cls: 'hgw-quest--pending', badge: `<span class="hgw-badge hgw-badge--info"><span class="hgw-badge__dot"></span>En vérification</span>` },
+    validated: { cls: 'hgw-quest--done', badge: `<span class="hgw-badge hgw-badge--success">${icon('check')}Validé +${q.points}</span>` },
+    rejected: { cls: 'hgw-quest--rejected', badge: `<span class="hgw-badge hgw-badge--danger">Refusée</span>` },
+  };
+  const st = states[q.status] || { cls: '', badge: `<span class="hgw-badge">Expiré</span>` };
+
+  let actions = '';
+  if (q.status === 'open') {
+    actions = `<button type="button" class="hgw-btn hgw-btn--primary" data-proof="${q.id}">Envoyer ma preuve</button>
+      <button type="button" class="hgw-btn hgw-btn--secondary hgw-btn--icon" data-reroll="${q.id}" ${appState.canRerollToday ? '' : 'disabled'}
+        aria-label="${appState.canRerollToday ? 'Relancer ce défi (1 relance aujourd’hui)' : 'Relance déjà utilisée aujourd’hui'}"
+        title="${appState.canRerollToday ? 'Relancer ce défi' : 'Prochaine relance demain à 3 h'}">${icon('dice')}</button>`;
+  } else if (q.status === 'rejected') {
+    actions = `<button type="button" class="hgw-btn hgw-btn--primary" data-proof="${q.id}">Renvoyer une preuve</button>`;
+  }
+
+  return `<article class="hgw-quest ${st.cls}">
+    <div class="hgw-quest__top">
+      <span class="hgw-quest__game">${monogram(game, true)}${esc(q.game_name)} <span class="quota ${used >= cap ? 'is-full' : ''}" title="Défis de ce jeu cette semaine">${used}/${cap}</span></span>
+      ${st.badge}
+    </div>
+    <div>
+      ${diffPips(q.difficulty)}
+      <h3 class="hgw-quest__title" style="margin-top: var(--space-2)">${esc(plain(q.title))}</h3>
+      <p class="hgw-quest__desc">${esc(plain(q.description))}</p>
+      ${q.status === 'submitted' ? `<p class="small faint" style="margin-top: var(--space-2)">Envoyée ${esc(timeAgo(q.submitted_at))}. Un orga valide en général dans la soirée.</p>` : ''}
+      ${q.status === 'open' && q.proof_hint ? `<p class="small faint" style="margin-top: var(--space-2)">Preuve attendue : ${esc(plain(q.proof_hint))}</p>` : ''}
+    </div>
+    ${q.status === 'rejected' ? `<div class="hgw-quest__note"><b>Motif :</b> ${esc(plain(q.reject_reason) || 'preuve incomplète.')}</div>` : ''}
+    ${actions ? `<div class="hgw-quest__actions">${actions}</div>` : ''}
+  </article>`;
+}
+
+function renderMyStats() {
+  const m = me() || { rank: '—', total_points: 0, async_points: 0, live_points: 0, tombola_eligible: false, tombola_progress_pct: 0 };
+  const total = (appState.leaderboard || []).length;
+  const reg = appState.myRegularity || { activeDaysCount: 0, totalBonusPoints: 0, tiers: [] };
+  const nextTier = (reg.tiers || []).find((t) => !t.unlocked);
+  const left = Math.max(0, appState.tombolaThreshold - m.total_points);
+  return `<div class="grid-4">
+    <button type="button" class="hgw-stat" data-open-ledger style="border:0;text-align:left;color:inherit;font:inherit;cursor:pointer">
+      <div class="hgw-stat__label">Rang</div>
+      <div class="hgw-stat__value">#${m.rank}<small>/ ${total}</small></div>
+      <div class="hgw-stat__meta">Voir mon historique</div>
+    </button>
+    <div class="hgw-stat">
+      <div class="hgw-stat__label">Points</div>
+      <div class="hgw-stat__value hgw-stat__value--gold">${fmt(m.total_points)}</div>
+      <div class="hgw-split" style="margin-top: var(--space-2)" title="Quinzaine ${m.async_points} · week-end ${m.live_points}"><span class="a" style="flex:${m.async_points || 0}"></span><span class="l" style="flex:${m.live_points || 0}"></span></div>
+      <div class="hgw-stat__meta">Quinzaine ${fmt(m.async_points)} · week-end ${fmt(m.live_points)}</div>
+    </div>
+    <div class="hgw-stat">
+      <div class="hgw-stat__label">Tombola</div>
+      ${m.tombola_eligible ? `<div class="hgw-stat__value t-success">Qualifié</div><div class="hgw-stat__meta">Ton ticket est dans l’urne.</div>` : `<div class="hgw-stat__value">${fmt(left)}<small>pts restants</small></div><div class="hgw-progress"><span style="width:${m.tombola_progress_pct}%"></span></div>`}
+    </div>
+    <div class="hgw-stat">
+      <div class="hgw-stat__label">Régularité</div>
+      <div class="hgw-stat__value">${reg.activeDaysCount}<small>/ 12 j</small></div>
+      <div class="tiers">${(reg.tiers || []).map((t) => `<span class="tier ${t.unlocked ? 'is-on' : ''}" title="${t.days} jours actifs : +${t.points} pts"><b>+${t.points}</b><span>${t.days} j</span></span>`).join('')}</div>
+      ${nextTier ? '' : `<div class="hgw-stat__meta">Tous les paliers débloqués (+${reg.totalBonusPoints}).</div>`}
+    </div>
+  </div>`;
+}
+
+function renderGames() {
+  const games = appState.games || [];
+  const cap = appState.maxWeeklyQuestsPerGame || 4;
+  const counts = appState.myWeeklyGameCounts || {};
+  const act1 = phaseInfo().key === 'act1';
+  const selectedCount = games.filter((g) => !g.is_universal && selectedGameIds.has(g.id)).length;
+  const capped = games.filter((g) => selectedGameIds.has(g.id) && !g.is_universal && (counts[g.id] || 0) >= cap);
+  const openSelected = selectedCount - capped.length;
+
+  return `<div class="section-head">
+      <div>
+        <h2 class="section-title">Mes jeux</h2>
+        <p class="small muted" style="margin-top: var(--space-1)">${selectedCount} coché${selectedCount > 1 ? 's' : ''} · minimum 4 · ${cap} défis max par jeu et par semaine</p>
+      </div>
+      <button type="button" class="hgw-btn hgw-btn--${gamesDirty || (appState.mySelectedGames || []).length < 4 ? 'primary' : 'secondary'} hgw-btn--sm" id="save-games" ${gamesDirty ? '' : 'disabled'}>Enregistrer mes jeux</button>
+    </div>
+    ${capped.length && openSelected < 4 ? `<div class="banner banner--info" style="margin-bottom: var(--space-4)">${icon('info')}<span><b>${capped.map((g) => esc(g.short_name)).join(', ')}</b> ${capped.length > 1 ? 'sont complets' : 'est complet'} cette semaine. Coche d’autres jeux pour garder de la variété dans tes défis.</span></div>` : ''}
+    <div class="games-grid">${games
+      .map((g) => {
+        const used = counts[g.id] || 0;
+        const full = !g.is_universal && used >= cap;
+        if (g.is_universal) {
+          return `<div class="game-tile is-universal">${monogram(g)}<span><span class="game-tile__name">${esc(g.short_name)}</span><span class="game-tile__meta">Inclus d’office · ${esc(plain(g.platforms))}</span></span><span class="quota">${used}/${cap}</span></div>`;
+        }
+        const on = selectedGameIds.has(g.id);
+        return `<button type="button" class="game-tile ${full ? 'is-capped' : ''}" data-game="${esc(g.id)}" aria-pressed="${on}">
+          ${monogram(g)}
+          <span><span class="game-tile__name">${esc(g.name)}</span><span class="game-tile__meta">${full ? (act1 ? 'Complet jusqu’à lundi' : 'Complet cette semaine') : on ? `${used}/${cap} cette semaine` : esc(plain(g.platforms))}</span></span>
+          <span class="game-tile__check" aria-hidden="true">${on ? icon('check') : ''}</span>
+        </button>`;
+      })
+      .join('')}</div>`;
+}
+
+function bindGames(root) {
+  root.querySelectorAll('[data-game]').forEach((tile) =>
+    tile.addEventListener('click', () => {
+      const id = tile.dataset.game;
+      if (selectedGameIds.has(id)) selectedGameIds.delete(id);
+      else selectedGameIds.add(id);
+      gamesDirty = true;
+      $('my-games').innerHTML = renderGames();
+      bindGames($('my-games'));
+      $('my-games').querySelector(`[data-game="${CSS.escape(id)}"]`)?.focus();
+    })
+  );
+  root.querySelector('#save-games')?.addEventListener('click', async (e) => {
+    const n = (appState.games || []).filter((g) => !g.is_universal && selectedGameIds.has(g.id)).length;
+    if (n < 4) return toast({ title: `Coche encore ${4 - n} jeu${4 - n > 1 ? 'x' : ''}`, text: 'Il en faut au moins 4.', type: 'danger' });
+    e.currentTarget.disabled = true;
+    const { ok, data } = await api('/api/profile/games', { json: { gameIds: Array.from(selectedGameIds) } });
+    if (!ok) {
+      e.currentTarget.disabled = false;
+      return toastError(data);
+    }
+    gamesDirty = false;
+    toast({ title: 'Jeux enregistrés', text: 'Tes défis du jour sont prêts.', type: 'success' });
+    fetchState();
+  });
+}
+
+function emptyCard(title, text) {
+  return `<div class="hgw-card hgw-card--flat"><div class="hgw-empty"><strong>${esc(title)}</strong>${esc(text)}</div></div>`;
+}
+
+// ============================================================================
+// CLASSEMENT
+// ============================================================================
+function lbRow(p, rank, withSplit = true, extra = '') {
+  const isMe = p.id === appState.user?.id;
+  const sub = `${p.quests_validated || 0} défis · ${p.tmnf_medals_count || 0} médaille${(p.tmnf_medals_count || 0) > 1 ? 's' : ''}`;
+  const left = appState.tombolaThreshold - p.total_points;
+  return `<tr class="${isMe ? 'is-me' : ''} ${extra}" data-player="${esc(p.id)}">
+    <td class="hgw-rank ${rank === 1 ? 'hgw-rank--1' : ''}">${rank}</td>
+    <td><button type="button" class="linklike hgw-player" data-player-btn="${esc(p.id)}" aria-label="Voir l’historique de ${esc(p.display_name)}">
+      ${avatar(p)}
+      <span style="min-width:0"><span class="hgw-player__name">${esc(p.display_name)}${isMe ? ' <span class="hgw-badge" style="height:18px">toi</span>' : ''}</span><span class="hgw-player__sub" style="display:block">${sub}</span></span>
+    </button></td>
+    ${withSplit ? `<td class="split-cell"><div class="hgw-split" title="Quinzaine ${p.async_points} · week-end ${p.live_points}"><span class="a" style="flex:${p.async_points}"></span><span class="l" style="flex:${p.live_points}"></span></div></td>` : ''}
+    <td class="r"><div class="hgw-pts">${fmt(p.total_points)}</div>${p.tombola_eligible ? `<div class="hgw-ticket">Tombola ✓</div>` : isMe ? `<div class="hgw-player__sub">${fmt(left)} pts avant tombola</div>` : ''}</td>
+  </tr>`;
+}
+
+function withTieRanks(rows, key) {
+  let prev = null;
+  let rank = 0;
+  return rows.map((r, i) => {
+    if (prev === null || r[key] !== prev) rank = i + 1;
+    prev = r[key];
+    return { row: r, rank };
+  });
+}
+
+function renderLeaderboard() {
+  const all = appState.leaderboard || [];
+  $('lb-n-all').textContent = all.length;
+  $('lb-n-tombola').textContent = all.filter((p) => p.tombola_eligible).length;
+
+  // Podium
+  const prizes = ['Carte cadeau 10 €', 'Discord Nitro', 'Abonnement Twitch'];
+  const card = (p, place) => {
+    if (!p) return `<div class="podium__card is-empty is-${place}"><span class="podium__place">${place}${place === 1 ? 're' : 'e'} place</span><span class="muted">Place libre</span><span class="podium__prize">${prizes[place - 1]}</span></div>`;
+    return `<button type="button" class="podium__card is-${place}" data-player-btn="${esc(p.id)}">
+      <span class="podium__place">${place}${place === 1 ? 're' : 'e'} place</span>
+      <span class="row" style="gap: var(--space-3)">${avatar(p, 'hgw-avatar--lg')}<span><span class="hgw-player__name" style="font-size:16px;display:block">${esc(p.display_name)}</span><span class="hgw-player__sub">${place > 1 && all[0] ? `${fmt(all[0].total_points - p.total_points)} pts derrière` : 'En tête'}</span></span></span>
+      <span class="podium__pts">${fmt(p.total_points)} <small class="muted" style="font-size:14px">pts</small></span>
+      <span class="podium__prize">${icon('gift')} ${prizes[place - 1]}</span>
+    </button>`;
+  };
+  $('podium').innerHTML = card(all[1], 2) + card(all[0], 1) + card(all[2], 3);
+
+  // Tableau
+  let rows = [...all];
+  const q = leaderboardSearch.trim().toLowerCase();
+  if (q) rows = rows.filter((p) => [p.display_name, p.username, p.tmnf_login].some((v) => String(v || '').toLowerCase().includes(q)));
+  let key = 'total_points';
+  if (leaderboardFilter === 'tombola') rows = rows.filter((p) => p.tombola_eligible);
+  if (leaderboardFilter === 'async') key = 'async_points';
+  if (leaderboardFilter === 'live') key = 'live_points';
+  rows.sort((a, b) => b[key] - a[key] || b.total_points - a.total_points);
+  const ranked = withTieRanks(rows, key);
+
+  const tbody = $('lb-tbody');
+  if (!ranked.length) {
+    tbody.innerHTML = `<tr><td colspan="4"><div class="hgw-empty"><strong>Aucun joueur trouvé</strong>Essaie un autre nom ou un autre filtre.</div></td></tr>`;
+  } else {
+    const truncated = !leaderboardExpanded && ranked.length > LB_LIMIT;
+    const shown = truncated ? ranked.slice(0, LB_LIMIT) : ranked;
+    let html = shown.map(({ row, rank }) => lbRow(row, rank)).join('');
+    const myIdx = ranked.findIndex((r) => r.row.id === appState.user?.id);
+    if (truncated && myIdx >= LB_LIMIT) html += lbRow(ranked[myIdx].row, ranked[myIdx].rank, true, 'is-pinned');
+    if (truncated) html += `<tr><td colspan="4" style="text-align:center"><button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--sm" id="lb-more">Afficher les ${ranked.length - LB_LIMIT} autres joueurs</button></td></tr>`;
+    tbody.innerHTML = html;
+    $('lb-more')?.addEventListener('click', () => {
+      leaderboardExpanded = true;
+      renderLeaderboard();
+    });
+  }
+
+  // Activité
+  const feed = appState.recentFeed || [];
+  $('feed').innerHTML = feed.length
+    ? feed
+        .map(
+          (it) => `<div class="feed__item"><div><div class="feed__who">${esc(it.display_name)}</div><div class="feed__what">${esc(plain(it.label))} · ${esc(timeAgo(it.updated_at))}</div></div><span class="hgw-badge hgw-badge--points">${signed(it.points)}</span></div>`
+        )
+        .join('')
+    : `<div class="hgw-empty"><strong>Rien pour l’instant</strong>Les premiers points apparaîtront ici en direct.</div>`;
+}
+
+// ============================================================================
+// TRACKMANIA
+// ============================================================================
+function renderTrackmania() {
+  const s = appState.eventSettings || {};
+  const unlocked = Boolean(s.tmnf_weekly_unlocked);
+  const locked = Boolean(s.tmnf_weekly_locked);
+  const server = appState.tmnfServer || {};
+  const weekly = appState.weeklyTmnfLeaderboard || [];
+
+  let state;
+  if (unlocked) state = `<span class="hgw-badge hgw-badge--success"><span class="hgw-badge__dot"></span>Ouvert</span>`;
+  else if (locked) state = `<span class="hgw-badge">Terminé</span>`;
+  else state = `<span class="hgw-badge">${icon('lock')}Acte II</span>`;
+
+  $('tm-server-card').innerHTML = `
+    <div class="hgw-card__head">
+      <div>
+        <h2 class="hgw-card__title">Map du serveur</h2>
+        <p class="hgw-card__desc">Top 10 : 150 · 110 · 80 · 50 · 30 pts${s.tmnf_cutoff_at ? ` · jusqu’au ${esc(fmtDate(s.tmnf_cutoff_at))}` : ''}</p>
+      </div>
+      ${state}
+    </div>
+    ${
+      unlocked
+        ? `<div class="addr"><div><div class="hgw-stat__label">Adresse</div><div class="addr__v" id="tm-addr">${esc(server.playitAddress || '')}</div></div>
+            <div class="row"><button type="button" class="hgw-btn hgw-btn--secondary hgw-btn--sm" id="copy-addr">${icon('copy')}Copier</button>
+            <a class="hgw-btn hgw-btn--primary hgw-btn--sm" href="${esc(server.joinUrl || '#')}">${icon('play')}Rejoindre</a></div></div>`
+        : locked
+        ? `<div class="banner">${icon('flag')}<span>Le chrono serveur est terminé : le top 10 est figé.</span></div>`
+        : `<div class="banner">${icon('lock')}<span>Ouvre au début de l’acte II, le ${esc(fmtDate(s.week2_start_at))}. D’ici là, chasse les médailles sur les 8 pistes solo.</span></div>`
+    }
+    <div class="table-wrap" style="margin-top: var(--space-4)">
+      <table class="hgw-table">
+        <thead><tr><th>#</th><th>Pilote</th><th class="r">Chrono</th><th class="r">Points</th></tr></thead>
+        <tbody>${
+          weekly.length
+            ? weekly
+                .slice(0, 10)
+                .map(
+                  (r) => `<tr class="${r.user_id === appState.user?.id ? 'is-me' : ''}"><td class="hgw-rank ${r.rank === 1 ? 'hgw-rank--1' : ''}">${r.rank}</td><td class="hgw-player__name">${esc(r.display_name)}</td><td class="r hgw-num">${esc(r.formatted_time)}</td><td class="r"><span class="hgw-badge hgw-badge--points">+${r.projected_points}</span></td></tr>`
+                )
+                .join('')
+            : `<tr><td colspan="4"><div class="hgw-empty" style="padding: var(--space-5)">${unlocked ? '<strong>Aucun chrono</strong>Pose le premier temps.' : '<strong>Pas encore de classement</strong>Il démarre à l’ouverture du serveur.'}</div></td></tr>`
+        }</tbody>
+      </table>
+    </div>`;
+  $('copy-addr')?.addEventListener('click', () => copyText(server.playitAddress, 'Adresse copiée'));
+
+  const loginInput = $('tmnf-login-input');
+  if (appState.user?.tmnf_login && document.activeElement !== loginInput) loginInput.value = appState.user.tmnf_login;
+
+  // Pistes
+  const subs = new Map((appState.myTmnfSubmissions || []).map((x) => [x.map_id, x]));
+  const maps = (appState.tmnfMaps || []).filter((m) => !m.is_weekly);
+  const total = maps.reduce((acc, m) => acc + (subs.get(m.id)?.best_points || 0), 0);
+  $('tm-total-badge').textContent = `${total} / ${maps.length * 30} pts`;
+
+  $('track-grid').innerHTML = maps
+    .map((m) => {
+      const sub = subs.get(m.id);
+      const my = sub ? sub.best_time_ms : null;
+      const steps = [
+        { key: 'author', cls: 'm-author', ms: m.author_ms, t: m.author_formatted },
+        { key: 'gold', cls: 'm-gold', ms: m.gold_ms, t: m.gold_formatted },
+        { key: 'silver', cls: 'm-silver', ms: m.silver_ms, t: m.silver_formatted },
+        { key: 'bronze', cls: 'm-bronze', ms: m.bronze_ms, t: m.bronze_formatted },
+      ];
+      const nextKey = (my === null ? steps[3] : [...steps].reverse().find((s) => my > s.ms))?.key;
+      const pts = sub?.best_points || 0;
+      let pb = `<span>Pas encore de replay</span>`;
+      let delta = m.wr_formatted ? `<span class="small muted">Record ${esc(m.wr_holder)} <b class="hgw-num" style="color:var(--ink-1)">${esc(m.wr_formatted)}</b></span>` : '';
+      if (my !== null) {
+        pb = `<span>Ton record <b class="hgw-num" style="color:var(--ink-1)">${esc(sub.best_time_formatted)}</b></span>`;
+        const next = steps.find((s) => s.key === nextKey);
+        delta = next ? `<span class="hgw-delta">${MEDAL_LABEL[next.key]} à ${deltaSec(next.ms - my)}</span>` : `<span class="hgw-delta t-success">Auteur obtenue</span>`;
+      }
+      return `<article class="hgw-track">
+        <div class="hgw-track__head"><div><span class="hgw-track__code">${esc(m.code)}</span><h3 class="hgw-track__name">${esc(trackName(m))}</h3></div>
+          <span class="hgw-badge ${pts ? 'hgw-badge--points' : ''}">${pts} / 30</span></div>
+        <div class="hgw-medals">${steps
+          .map((s) => `<div class="hgw-medal ${my !== null && my <= s.ms ? 'got' : ''} ${s.key === nextKey ? 'next' : ''}"><div class="hgw-medal__k"><i class="${s.cls}"></i>${MEDAL_LABEL[s.key]}</div><div class="hgw-medal__t">${esc(s.t)}</div></div>`)
+          .join('')}</div>
+        <div class="hgw-track__pb">${pb}${delta}</div>
+        <div class="row">
+          <button type="button" class="hgw-btn hgw-btn--secondary hgw-btn--sm" data-track="${esc(m.id)}">Classement de la piste</button>
+          ${appState.devMode && appState.user ? `<a class="hgw-btn hgw-btn--ghost hgw-btn--sm" href="/api/tmnf/sample-replay/${encodeURIComponent(m.id)}">Replay de test</a>` : ''}
+        </div>
+      </article>`;
+    })
+    .join('');
+  $('track-grid').querySelectorAll('[data-track]').forEach((b) => b.addEventListener('click', () => openTrack(b.dataset.track)));
+}
+
+async function uploadReplays(files) {
+  if (!appState?.user) return openLogin();
+  const list = Array.from(files || []).filter((f) => /\.gbx$/i.test(f.name));
+  if (!list.length) return toast({ title: 'Aucun fichier .Replay.gbx', text: 'Glisse des fichiers qui finissent par .Replay.gbx.', type: 'danger' });
+  const box = $('gbx-results');
+  box.innerHTML = list
+    .map((f) => `<div class="hgw-file"><span class="hgw-file__name">${esc(f.name)}</span><span class="hgw-badge hgw-badge--info"><span class="hgw-spinner" style="width:10px;height:10px"></span>Analyse</span></div>`)
+    .join('');
+  const fd = new FormData();
+  list.forEach((f) => fd.append('replays', f));
+  const { ok, data } = await api('/api/tmnf/submit-replays-batch', { method: 'POST', body: fd });
+  if (!ok) {
+    box.innerHTML = `<div class="banner banner--danger">${icon('alert')}<span>${esc(plain(data.error) || 'Envoi impossible.')}</span></div>`;
+    return;
+  }
+  box.innerHTML = (data.results || [])
+    .map((r) =>
+      r.ok
+        ? `<div class="hgw-file"><span class="hgw-file__name">${esc(r.mapCode)} · ${esc(r.formattedTime)}</span><span class="hgw-badge ${r.deltaPoints > 0 ? 'hgw-badge--success' : ''}">${MEDAL_LABEL[r.medal] || esc(r.medal)}${r.deltaPoints > 0 ? ` · +${r.deltaPoints}` : ' · pas mieux'}</span></div>`
+        : `<div class="hgw-file"><span class="hgw-file__name">${esc(r.fileName)}</span><span class="hgw-badge hgw-badge--danger" title="${esc(plain(r.error))}">${esc(plain(r.error)).slice(0, 48)}</span></div>`
+    )
+    .join('');
+  const refused = (data.results || []).filter((r) => !r.ok).length;
+  toast({
+    title: data.totalDeltaPoints > 0 ? `+${data.totalDeltaPoints} pts · ${data.validCount} replay${data.validCount > 1 ? 's' : ''} validé${data.validCount > 1 ? 's' : ''}` : `${data.validCount} replay${data.validCount > 1 ? 's' : ''} analysé${data.validCount > 1 ? 's' : ''}`,
+    text: refused ? `${refused} refusé${refused > 1 ? 's' : ''} : voir le détail sous la zone de dépôt.` : '',
+    type: refused ? 'danger' : data.totalDeltaPoints > 0 ? 'points' : 'success',
+  });
+  $('gbx-input').value = '';
+  fetchState();
+}
+
+async function openTrack(mapId) {
+  const { ok, data } = await api(`/api/tmnf/map/${encodeURIComponent(mapId)}/leaderboard`);
+  if (!ok) return toastError(data);
   const m = data.map;
   const entries = data.entries || [];
-
-  document.getElementById('track-lb-title').textContent = `🏁 ${m.code} — ${m.name}`;
-  document.getElementById('track-lb-subtitle').innerHTML = `
-    UID : <code class="mono">${escapeHtml(m.uid)}</code> • Auteur : <strong class="mono">${m.author_formatted}</strong> • Or : <strong class="mono">${m.gold_formatted}</strong>
-  `;
-
-  const wrBanner = document.getElementById('track-lb-wr-banner');
-  if (entries.length > 0) {
-    const wr = entries[0];
-    wrBanner.innerHTML = `
-      <div style="background:var(--bg-elevated);padding:0.85rem 1rem;border-radius:var(--radius-md);border:1px solid var(--accent-gold);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.75rem;">
-        <div>
-          <div style="font-size:0.72rem;text-transform:uppercase;color:var(--accent-gold);font-weight:700;">🏆 Record du Serveur (WR Discord)</div>
-          <div style="font-size:1.05rem;font-weight:700;margin-top:0.15rem;">
-            ${escapeHtml(wr.display_name)} — <span class="mono" style="color:var(--accent-emerald);">${wr.formatted_time}</span>
-          </div>
-        </div>
-        <a href="/api/tmnf/map/${encodeURIComponent(m.id)}/ghost/${encodeURIComponent(wr.user_id)}" class="btn btn-primary btn-sm">
-          👻 Télécharger le Ghost WR (.Replay.gbx)
-        </a>
-      </div>
-    `;
-  } else {
-    wrBanner.innerHTML = `
-      <div style="background:var(--bg-elevated);padding:0.85rem 1rem;border-radius:var(--radius-md);color:var(--text-muted);font-size:0.86rem;">
-        Aucun temps soumis sur cette piste pour le moment. Sois le premier à poser le WR Discord !
-      </div>
-    `;
-  }
-
-  const tbody = document.getElementById('track-lb-tbody');
-  if (entries.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:1.5rem;">Aucun chrono enregistré.</td></tr>`;
-  } else {
-    tbody.innerHTML = entries
-      .map(
-        (e) => `
-        <tr>
-          <td class="rank-cell">${e.rank === 1 ? '🥇 #1' : e.rank === 2 ? '🥈 #2' : e.rank === 3 ? '🥉 #3' : `#${e.rank}`}</td>
-          <td>
-            <strong>${escapeHtml(e.display_name)}</strong>
-            ${e.tmnf_login ? `<span class="mono" style="font-size:0.72rem;color:var(--text-muted);margin-left:4px;">[${escapeHtml(e.tmnf_login)}]</span>` : ''}
-          </td>
-          <td class="mono" style="font-weight:700;color:var(--accent-emerald);">${e.formatted_time}</td>
-          <td class="mono" style="font-size:0.8rem;color:var(--text-secondary);">
-            ${e.delta_wr_ms === 0 ? 'WR' : `+${(e.delta_wr_ms / 1000).toFixed(3)}s`}
-          </td>
-          <td><span class="badge badge-easy">${e.medal.toUpperCase()}</span></td>
-          <td>
-            <a href="/api/tmnf/map/${encodeURIComponent(m.id)}/ghost/${encodeURIComponent(e.user_id)}" class="btn btn-secondary btn-sm" title="Télécharger le fantôme .Replay.gbx de ${escapeHtml(e.display_name)}">
-              👻 Ghost
-            </a>
-          </td>
-        </tr>
-      `
-      )
-      .join('');
-  }
-
-  document.getElementById('track-leaderboard-modal').classList.add('open');
+  $('track-title').textContent = `${m.code} · ${trackName(m)}`;
+  $('track-sub').textContent = `Auteur ${m.author_formatted} · Or ${m.gold_formatted} · Argent ${m.silver_formatted} · Bronze ${m.bronze_formatted}`;
+  $('track-wr').innerHTML = entries.length
+    ? `<div class="banner banner--gold">${icon('trophy')}<span style="flex:1">Record : <b>${esc(entries[0].display_name)}</b> en <b class="hgw-num">${esc(entries[0].formatted_time)}</b></span>
+        <a class="hgw-btn hgw-btn--secondary hgw-btn--sm" href="/api/tmnf/map/${encodeURIComponent(m.id)}/ghost/${encodeURIComponent(entries[0].user_id)}">${icon('download')}Ghost du record</a></div>`
+    : '';
+  $('track-tbody').innerHTML = entries.length
+    ? entries
+        .map(
+          (e) => `<tr class="${e.user_id === appState.user?.id ? 'is-me' : ''}"><td class="hgw-rank ${e.rank === 1 ? 'hgw-rank--1' : ''}">${e.rank}</td><td class="hgw-player__name">${esc(e.display_name)}</td>
+          <td class="r hgw-num">${esc(e.formatted_time)}</td><td class="r hgw-delta">${e.delta_wr_ms === 0 ? 'record' : deltaSec(e.delta_wr_ms)}</td>
+          <td><span class="hgw-badge">${MEDAL_LABEL[e.medal] || esc(e.medal)}</span></td>
+          <td class="r"><a class="hgw-btn hgw-btn--ghost hgw-btn--sm" href="/api/tmnf/map/${encodeURIComponent(m.id)}/ghost/${encodeURIComponent(e.user_id)}" aria-label="Télécharger le ghost de ${esc(e.display_name)}">${icon('download')}Ghost</a></td></tr>`
+        )
+        .join('')
+    : `<tr><td colspan="6"><div class="hgw-empty"><strong>Aucun chrono</strong>Sois le premier à poser un temps sur cette piste.</div></td></tr>`;
+  $('track-dialog').showModal();
 }
 
-function openLightbox(src, caption) {
-  const modal = document.getElementById('lightbox-modal');
-  const img = document.getElementById('lightbox-img');
-  const cap = document.getElementById('lightbox-caption');
-  if (!modal || !img) return;
-  img.src = src;
-  if (cap) cap.textContent = caption || 'Aperçu de la preuve';
-  modal.classList.add('open');
-}
-
-function renderQuestsAndGames() {
-  const questsContainer = document.getElementById('quests-container');
-  const gamesGrid = document.getElementById('games-selector-grid');
-  const drawer = document.getElementById('games-selector-drawer');
-  const toggleBtn = document.getElementById('toggle-games-drawer-btn');
-  const masterySection = document.getElementById('weekly-mastery-section');
-  const masteryStrip = document.getElementById('weekly-mastery-strip');
-  const regStrip = document.getElementById('regularity-bonus-strip');
-
-  const hasEnoughGames = (appState.mySelectedGames || []).length >= 4;
-  const maxCap = appState.maxWeeklyQuestsPerGame || 4;
-  const reg = appState.myRegularity || {
-    activeDaysCount: 0,
-    totalBonusPoints: 0,
-    tiers: [
-      { days: 4, points: 20, unlocked: false },
-      { days: 8, points: 40, unlocked: false },
-      { days: 12, points: 60, unlocked: false },
-    ],
-  };
-
-  if (regStrip) {
-    regStrip.innerHTML = `
-      <div class="card" style="padding:0.9rem 1.15rem;border:1px solid var(--border-gold);background:linear-gradient(135deg, hsla(43, 96%, 58%, 0.08), var(--bg-surface));">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.75rem;">
-          <div>
-            <div style="font-size:0.75rem;text-transform:uppercase;color:var(--accent-gold);font-weight:700;letter-spacing:0.04em;">
-              🔥 Jauge de Régularité sur 2 Semaines (Assiduité)
-            </div>
-            <div style="font-size:0.86rem;color:var(--text-secondary);margin-top:0.15rem;">
-              Valide au moins <strong>1 défi par jour</strong> pour débloquer jusqu'à <strong>+120 pts bonus</strong> :
-              tu as actuellement <strong class="mono" style="color:var(--text-primary);">${reg.activeDaysCount} jour(s) actif(s)</strong>.
-            </div>
-          </div>
-          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-            ${(reg.tiers || [])
-              .map(
-                (t) => `
-                <div style="padding:0.4rem 0.75rem;border-radius:var(--radius-sm);border:1px solid ${
-                  t.unlocked ? 'var(--accent-emerald)' : 'var(--border-strong)'
-                };background:${t.unlocked ? 'hsla(152, 76%, 48%, 0.14)' : 'var(--bg-elevated)'};font-size:0.8rem;">
-                  <strong>${t.unlocked ? '✅' : '🔒'} Palier ${t.days}j</strong> :
-                  <span class="mono" style="color:${t.unlocked ? 'var(--accent-emerald)' : 'var(--accent-gold)'};font-weight:700;">+${t.points} pts</span>
-                </div>
-              `
-              )
-              .join('')}
-          </div>
-        </div>
-      </div>
-    `;
+// ============================================================================
+// TOURNOIS
+// ============================================================================
+function teamsOf(t) {
+  const map = new Map();
+  for (const r of t.registrations) {
+    if (!r.team_number) continue;
+    if (!map.has(r.team_number)) map.set(r.team_number, { num: r.team_number, name: plain(r.team_name) || `Équipe ${r.team_number}`, members: [] });
+    map.get(r.team_number).members.push(r);
   }
-
-  if (appState.user && hasEnoughGames) {
-    toggleBtn.style.display = 'inline-flex';
-    toggleBtn.textContent = gamesDrawerOpen
-      ? '🔼 Masquer la sélection de jeux'
-      : `⚙️ Modifier mes jeux (${appState.mySelectedGames.length} cochés)`;
-    drawer.style.display = gamesDrawerOpen ? 'block' : 'none';
-    masterySection.style.display = 'block';
-
-    // Render mastery strip (X/4 per game per week, reset on Week 2)
-    const counts = appState.myWeeklyGameCounts || {};
-    const myGamesObjs = (appState.games || []).filter(
-      (g) => g.is_universal || appState.mySelectedGames.includes(g.id)
-    );
-
-    const pipIndices = Array.from({ length: maxCap }, (_, idx) => idx);
-    masteryStrip.innerHTML = myGamesObjs
-      .map((g) => {
-        const cnt = Math.min(maxCap, counts[g.id] || 0);
-        const pipsHtml = pipIndices
-          .map((i) => `<span class="pip ${i < cnt ? 'filled' : ''}"></span>`)
-          .join('');
-        return `
-          <div class="mastery-chip ${cnt >= maxCap ? 'capped' : ''}" title="${cnt}/${maxCap} défis validés ou soumis cette semaine sur ${escapeHtml(g.name)} (Reset auto en Semaine 2)">
-            <span>${g.emoji} <strong>${escapeHtml(g.short_name)}</strong></span>
-            <span class="pips">${pipsHtml}</span>
-            <span class="mono" style="font-size:0.74rem;color:var(--text-secondary);">${cnt}/${maxCap}</span>
-          </div>
-        `;
-      })
-      .join('');
-  } else {
-    toggleBtn.style.display = 'none';
-    drawer.style.display = 'block';
-    masterySection.style.display = 'none';
-  }
-
-  if (!appState.user) {
-    questsContainer.innerHTML = `
-      <div class="card" style="text-align:center;padding:2rem;">
-        <h3 class="card-title" style="margin-bottom:0.5rem;">Connecte-toi pour découvrir tes 3 défis du jour !</h3>
-        <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:1rem;">
-          Chaque nuit à 03h00, le site tire au sort 1 défi Facile (10 pts), 1 Moyen (15 pts) et 1 Difficile (25 pts) = 50 pts/jour + Bonus Régularité (+120 pts).
-        </p>
-        <button type="button" class="btn btn-primary" id="quests-login-btn">🎮 Se connecter</button>
-      </div>
-    `;
-    document.getElementById('quests-login-btn')?.addEventListener('click', () => {
-      document.getElementById('login-modal').classList.add('open');
-    });
-  } else if (!hasEnoughGames) {
-    questsContainer.innerHTML = `
-      <div class="card" style="border-color:var(--accent-gold);">
-        <h3 class="card-title">👇 Coche au moins 4 jeux ci-dessous pour générer immédiatement tes 3 défis !</h3>
-        <p style="color:var(--text-secondary);font-size:0.88rem;margin-top:0.35rem;">
-          Pas besoin d'attendre 03h00 du matin : tes 3 premiers défis tombent dès la sauvegarde.
-        </p>
-      </div>
-    `;
-  } else {
-    const quests = appState.myDailyQuests || [];
-    const doneCount = quests.filter((q) => q.status === 'validated').length;
-    document.getElementById('nav-quests-badge').textContent = `${doneCount}/${quests.length}`;
-
-    questsContainer.innerHTML = `
-      <div class="grid-3">
-        ${quests
-          .map((q) => {
-            const diffBadge =
-              q.difficulty === 'easy'
-                ? `<span class="badge badge-easy">Facile • +${q.points} pts</span>`
-                : q.difficulty === 'medium'
-                ? `<span class="badge badge-medium">Moyen • +${q.points} pts</span>`
-                : `<span class="badge badge-hard">Difficile • +${q.points} pts</span>`;
-
-            const gameWeekCnt = appState.myWeeklyGameCounts?.[q.game_id] || 0;
-
-            let actionArea = '';
-            if (q.status === 'open') {
-              actionArea = `
-                <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-                  <button type="button" class="btn btn-primary btn-sm open-proof-btn" data-id="${q.id}" data-title="${escapeHtml(q.title)}" data-hint="${escapeHtml(q.proof_hint)}">
-                    📤 Envoyer ma preuve (Ctrl+V)
-                  </button>
-                  ${
-                    appState.canRerollToday
-                      ? `<button type="button" class="btn btn-secondary btn-sm reroll-quest-btn" data-id="${q.id}">🎲 Reroll (1/j)</button>`
-                      : ''
-                  }
-                </div>
-              `;
-            } else if (q.status === 'submitted') {
-              actionArea = `<span class="badge badge-medium">🕵️ Preuve envoyée — En attente dans #preuves</span>`;
-            } else if (q.status === 'validated') {
-              actionArea = `<span class="badge badge-easy">✅ Validé (+${q.points} pts crédités)</span>`;
-            } else if (q.status === 'rejected') {
-              actionArea = `
-                <div>
-                  <div style="font-size:0.78rem;color:hsl(0,90%,72%);margin-bottom:0.45rem;">
-                    ❌ Refusé : ${escapeHtml(q.reject_reason || 'Preuve incomplète')}
-                  </div>
-                  <button type="button" class="btn btn-primary btn-sm open-proof-btn" data-id="${q.id}" data-title="${escapeHtml(q.title)}" data-hint="${escapeHtml(q.proof_hint)}">
-                    🔄 Renvoyer une nouvelle preuve
-                  </button>
-                </div>
-              `;
-            }
-
-            return `
-              <article class="quest-card ${q.status}">
-                <div>
-                  <div class="card-header">
-                    <span style="font-size:0.84rem;font-weight:700;color:var(--text-secondary);">
-                      ${q.game_emoji} ${escapeHtml(q.game_name)} <span class="mono" style="font-size:0.72rem;color:var(--text-muted);">(${gameWeekCnt}/${maxCap} sem.)</span>
-                    </span>
-                    ${diffBadge}
-                  </div>
-                  <h3 class="card-title" style="margin-bottom:0.45rem;">${escapeHtml(q.title)}</h3>
-                  <p style="font-size:0.88rem;color:var(--text-secondary);margin-bottom:0.75rem;">
-                    ${escapeHtml(q.description)}
-                  </p>
-                  <p style="font-size:0.76rem;color:var(--text-muted);">
-                    📸 <em>${escapeHtml(q.proof_hint)}</em>
-                  </p>
-                </div>
-                <div style="padding-top:0.75rem;border-top:1px solid var(--border-subtle);">
-                  ${actionArea}
-                </div>
-              </article>
-            `;
-          })
-          .join('')}
-      </div>
-    `;
-
-    questsContainer.querySelectorAll('.open-proof-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        resetProofModal();
-        document.getElementById('proof-assignment-id').value = btn.dataset.id;
-        document.getElementById('proof-modal-title').textContent = `Preuve — ${btn.dataset.title}`;
-        document.getElementById('proof-modal-hint').textContent = btn.dataset.hint;
-        document.getElementById('proof-modal').classList.add('open');
-      });
-    });
-
-    questsContainer.querySelectorAll('.reroll-quest-btn').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const res = await fetch(`/api/quests/${btn.dataset.id}/reroll`, { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(`❌ ${data.error}`);
-          return;
-        }
-        showToast('🎲 Défi relancé avec succès (même difficulté conservée) !');
-        await fetchState();
-      });
-    });
-  }
-
-  // Render games selector
-  gamesGrid.innerHTML = (appState.games || [])
-    .map((g) => {
-      if (g.is_universal) {
-        return `
-          <div class="game-tile universal">
-            <div class="game-tile-emoji">${g.emoji}</div>
-            <div class="game-tile-info">
-              <strong>${escapeHtml(g.short_name)} (Inclus d'office)</strong>
-              <span>${escapeHtml(g.platforms)}</span>
-            </div>
-          </div>
-        `;
-      }
-      const isSelected = selectedGameIds.has(g.id);
-      return `
-        <div class="game-tile ${isSelected ? 'selected' : ''}" data-game-id="${g.id}">
-          <div class="game-tile-emoji">${g.emoji}</div>
-          <div class="game-tile-info">
-            <strong>${escapeHtml(g.name)}</strong>
-            <span>${escapeHtml(g.platforms)}</span>
-          </div>
-        </div>
-      `;
-    })
-    .join('');
-
-  gamesGrid.querySelectorAll('.game-tile[data-game-id]').forEach((tile) => {
-    tile.addEventListener('click', () => {
-      const gid = tile.dataset.gameId;
-      if (selectedGameIds.has(gid)) {
-        selectedGameIds.delete(gid);
-        tile.classList.remove('selected');
-      } else {
-        selectedGameIds.add(gid);
-        tile.classList.add('selected');
-      }
-    });
-  });
-}
-
-function renderTrackmania() {
-  if (appState.tmnfServer) {
-    document.getElementById('tmnf-playit-addr').textContent = appState.tmnfServer.playitAddress;
-    document.getElementById('tmnf-join-link').href = appState.tmnfServer.joinUrl;
-  }
-
-  const phase = appState.eventSettings?.effective_phase || 'week1';
-  const serverUnlocked = Boolean(appState.eventSettings?.tmnf_weekly_unlocked);
-  const w2Banner = document.getElementById('tmnf-server-week2-banner');
-  const w2Badge = document.getElementById('tmnf-server-phase-badge');
-
-  if (w2Badge) {
-    w2Badge.className = `badge ${serverUnlocked ? 'badge-easy' : 'badge-medium'}`;
-    w2Badge.textContent = serverUnlocked ? '🔓 SEMAINE 2 OUVERTE • 150 pts' : '🔒 Déblocage en Semaine 2';
-  }
-
-  if (w2Banner) {
-    if (serverUnlocked) {
-      w2Banner.innerHTML = `
-        <div style="padding:0.65rem 0.9rem;border-radius:var(--radius-sm);background:hsla(152, 76%, 48%, 0.12);border:1px solid hsla(152, 76%, 48%, 0.45);font-size:0.83rem;color:var(--accent-emerald);">
-          🔓 <strong>Acte II (Semaine 2) actif :</strong> La Map Finale du Serveur 24/7 est ouverte ! Tes chronos sur le serveur ou via <code>.Replay.gbx</code> comptent pour le Top 10 (150 pts au 1er).
-        </div>
-      `;
-    } else if (phase === 'closed') {
-      w2Banner.innerHTML = `
-        <div style="padding:0.65rem 0.9rem;border-radius:var(--radius-sm);background:hsla(0, 84%, 60%, 0.12);border:1px solid hsla(0, 84%, 60%, 0.4);font-size:0.83rem;">
-          🏁 <strong>Chrono Serveur clôturé :</strong> Les résultats du Top 10 sont verrouillés.
-        </div>
-      `;
-    } else {
-      w2Banner.innerHTML = `
-        <div style="padding:0.65rem 0.9rem;border-radius:var(--radius-sm);background:hsla(43, 96%, 58%, 0.12);border:1px solid var(--border-gold);font-size:0.83rem;color:var(--accent-gold);">
-          🔒 <strong>Verrouillé pendant la Semaine 1 (Acte I) :</strong> La Map Serveur 24/7 se débloque automatiquement au lancement de la <strong>Semaine 2</strong> (${escapeHtml((appState.eventSettings?.week2_start_at || '').replace('T', ' '))}) ! En attendant, chasse les <strong>8 Maps Médailles Solo</strong> ci-dessous.
-        </div>
-      `;
-    }
-  }
-
-  const loginInput = document.getElementById('tmnf-login-input');
-  if (loginInput && appState.user?.tmnf_login && !loginInput.value) {
-    loginInput.value = appState.user.tmnf_login;
-  }
-
-  // Top 10 Weekly
-  const weeklyTbody = document.getElementById('weekly-tmnf-tbody');
-  const weeklyRows = appState.weeklyTmnfLeaderboard || [];
-  if (weeklyRows.length === 0) {
-    weeklyTbody.innerHTML = `
-      <tr>
-        <td colspan="4" style="text-align:center;color:var(--text-muted);padding:1.25rem;">
-          ${serverUnlocked ? 'Aucun temps enregistré sur la map serveur Semaine 2.' : '🔒 Classement ouvert dès le déblocage de la Semaine 2.'}
-        </td>
-      </tr>
-    `;
-  } else {
-    weeklyTbody.innerHTML = weeklyRows
-      .slice(0, 10)
-      .map(
-        (r) => `
-        <tr>
-          <td class="rank-cell">#${r.rank}</td>
-          <td><strong>${escapeHtml(r.display_name)}</strong></td>
-          <td class="mono" style="color:var(--accent-emerald);font-weight:700;">${r.formatted_time}</td>
-          <td class="mono" style="color:var(--accent-gold);font-weight:700;">+${r.projected_points} pts</td>
-        </tr>
-      `
-      )
-      .join('');
-  }
-
-  // 8 Cartes de Pistes Chasse aux Médailles
-  const cardsGrid = document.getElementById('track-cards-grid');
-  const mySubs = new Map((appState.myTmnfSubmissions || []).map((s) => [s.map_id, s]));
-  const medalMaps = (appState.tmnfMaps || []).filter((m) => !m.is_weekly);
-
-  cardsGrid.innerHTML = medalMaps
-    .map((m) => {
-      const sub = mySubs.get(m.id);
-      const myMs = sub ? sub.best_time_ms : null;
-      const myPts = sub ? sub.best_points : 0;
-
-      const hasAuthor = myMs !== null && myMs <= m.author_ms;
-      const hasGold = myMs !== null && myMs <= m.gold_ms;
-      const hasSilver = myMs !== null && myMs <= m.silver_ms;
-      const hasBronze = myMs !== null && myMs <= m.bronze_ms;
-
-      // Calcul du prochain objectif au millième
-      let nextGoalHtml = '';
-      if (myMs === null) {
-        nextGoalHtml = `<span style="color:var(--text-muted);">Aucun replay déposé — Auteur à <strong class="mono">${m.author_formatted}</strong></span>`;
-      } else if (hasAuthor) {
-        const margin = m.author_ms - myMs;
-        nextGoalHtml = `<span style="color:var(--tm-author);font-weight:600;">👑 Médaille Auteur verrouillée (-${(margin / 1000).toFixed(3)}s sous le seuil)</span>`;
-      } else if (hasGold) {
-        const diff = myMs - m.author_ms;
-        nextGoalHtml = `<span style="color:var(--accent-gold);">🎯 À <strong class="mono">${formatDeltaSeconds(diff)}</strong> de l'Auteur (+10 pts bonus)</span>`;
-      } else if (hasSilver) {
-        const diff = myMs - m.gold_ms;
-        nextGoalHtml = `<span style="color:var(--accent-sky);">🎯 À <strong class="mono">${formatDeltaSeconds(diff)}</strong> de l'Or (+10 pts bonus)</span>`;
-      } else {
-        const diff = myMs - m.silver_ms;
-        nextGoalHtml = `<span>🎯 À <strong class="mono">${formatDeltaSeconds(diff)}</strong> de l'Argent</span>`;
-      }
-
-      return `
-        <article class="track-card ${hasAuthor ? 'has-author' : ''}">
-          <div>
-            <div class="card-header" style="margin-bottom:0.55rem;">
-              <div>
-                <strong style="font-family:var(--font-display);font-size:1.05rem;">${escapeHtml(m.code)}</strong>
-                <div style="font-size:0.76rem;color:var(--text-muted);">${escapeHtml(m.name)}</div>
-              </div>
-              <span class="badge ${myPts === 30 ? 'badge-easy' : myPts >= 20 ? 'badge-hard' : 'badge-medium'}">
-                ${myPts} / 30 pts
-              </span>
-            </div>
-
-            <div class="wr-strip" style="margin-bottom:0.65rem;cursor:pointer;" data-open-track-lb="${m.id}" title="Voir le classement complet de la piste et télécharger le Ghost WR">
-              <span>🏆 WR Discord : <strong>${m.wr_holder ? escapeHtml(m.wr_holder) : '—'}</strong></span>
-              <span class="mono" style="color:var(--accent-gold);font-weight:700;">${m.wr_formatted || '—'} 👻</span>
-            </div>
-
-            <div class="medal-pips-row">
-              <div class="medal-box ${hasAuthor ? 'unlocked' : ''}">
-                <div style="font-size:0.68rem;font-weight:700;"><span class="medal-dot author"></span>Auteur</div>
-                <div class="mono" style="font-size:0.72rem;margin-top:2px;">${m.author_formatted}</div>
-              </div>
-              <div class="medal-box ${hasGold ? 'unlocked' : ''}">
-                <div style="font-size:0.68rem;font-weight:700;"><span class="medal-dot gold"></span>Or</div>
-                <div class="mono" style="font-size:0.72rem;margin-top:2px;">${m.gold_formatted}</div>
-              </div>
-              <div class="medal-box ${hasSilver ? 'unlocked' : ''}">
-                <div style="font-size:0.68rem;font-weight:700;"><span class="medal-dot silver"></span>Argent</div>
-                <div class="mono" style="font-size:0.72rem;margin-top:2px;">${m.silver_formatted}</div>
-              </div>
-              <div class="medal-box ${hasBronze ? 'unlocked' : ''}">
-                <div style="font-size:0.68rem;font-weight:700;"><span class="medal-dot bronze"></span>Bronze</div>
-                <div class="mono" style="font-size:0.72rem;margin-top:2px;">${m.bronze_formatted}</div>
-              </div>
-            </div>
-          </div>
-
-          <div style="padding-top:0.65rem;border-top:1px solid var(--border-subtle);display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;font-size:0.78rem;">
-            <div>
-              Mon record : <strong class="mono">${sub ? sub.best_time_formatted : '—'}</strong>
-              <div style="margin-top:0.15rem;">${nextGoalHtml}</div>
-            </div>
-            <div style="display:flex;gap:0.35rem;">
-              <button type="button" class="btn btn-secondary btn-sm" data-open-track-lb="${m.id}" title="Voir le classement de la piste et télécharger le Ghost WR">
-                👻 Top & Ghost
-              </button>
-              <a href="/api/tmnf/sample-replay/${m.id}" class="btn btn-secondary btn-sm" title="Télécharger un replay .gbx d'exemple sur cette piste">
-                🧪 .gbx
-              </a>
-            </div>
-          </div>
-        </article>
-      `;
-    })
-    .join('');
-
-  cardsGrid.querySelectorAll('[data-open-track-lb]').forEach((el) => {
-    el.addEventListener('click', () => openTrackLeaderboardModal(el.dataset.openTrackLb));
-  });
+  return [...map.values()];
 }
 
 function renderTournaments() {
-  const grid = document.getElementById('tournaments-grid');
   const myId = appState.user?.id;
-
-  grid.innerHTML = (appState.tournaments || [])
+  $('tournaments-grid').innerHTML = (appState.tournaments || [])
     .map((t) => {
-      const isRegistered = t.registrations.some((r) => r.user_id === myId);
-      const teamsMap = new Map();
-      for (const r of t.registrations) {
-        if (r.team_number) {
-          if (!teamsMap.has(r.team_number)) {
-            teamsMap.set(r.team_number, { name: r.team_name || `Équipe #${r.team_number}`, members: [] });
-          }
-          teamsMap.get(r.team_number).members.push(r);
-        }
-      }
-
-      const teamsHtml =
-        teamsMap.size > 0
-          ? `
-          <div style="margin-top:1rem;padding-top:0.85rem;border-top:1px solid var(--border-subtle);">
-            <div style="font-size:0.76rem;text-transform:uppercase;color:var(--accent-gold);font-weight:700;margin-bottom:0.5rem;">
-              ⚡ Équipes Équilibrées (Tirage Chapeaux 1 / 2 / 3)
-            </div>
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:0.6rem;">
-              ${Array.from(teamsMap.values())
-                .map(
-                  (tm) => `
-                  <div style="background:var(--bg-elevated);padding:0.65rem;border-radius:var(--radius-sm);border:1px solid var(--border-subtle);">
-                    <strong style="font-size:0.84rem;display:block;margin-bottom:0.3rem;">${escapeHtml(tm.name)}</strong>
-                    ${tm.members
-                      .map(
-                        (m) => `
-                        <div style="font-size:0.78rem;display:flex;justify-content:space-between;">
-                          <span>${escapeHtml(m.display_name)}</span>
-                          <span class="mono" style="color:var(--text-muted);">Ch.${m.pool}</span>
-                        </div>
-                      `
-                      )
-                      .join('')}
-                  </div>
-                `
-                )
-                .join('')}
-            </div>
-          </div>
-        `
-          : '';
-
-      return `
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">${t.emoji} ${escapeHtml(t.name)}</span>
-            <span class="badge ${t.is_major ? 'badge-hard' : 'badge-medium'}">
-              1er = ${t.points_scale['1']} pts
-            </span>
-          </div>
-          <div style="font-size:0.85rem;color:var(--accent-gold);font-weight:600;margin-bottom:0.35rem;">
-            📅 ${escapeHtml(t.scheduled_label)}
-          </div>
-          <p style="font-size:0.86rem;color:var(--text-secondary);margin-bottom:1rem;">
-            ${escapeHtml(t.mode_label)}
-          </p>
-
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.6rem;">
-            <span style="font-size:0.82rem;color:var(--text-muted);">
-              👥 <strong>${t.registrations.length}</strong> joueur(s) inscrit(s)
-            </span>
-            <button
-              type="button"
-              class="btn ${isRegistered ? 'btn-danger' : 'btn-primary'} btn-sm toggle-tourney-btn"
-              data-id="${t.id}"
-            >
-              ${isRegistered ? '✓ Inscrit (Se désinscrire)' : 'S’inscrire au tournoi'}
-            </button>
-          </div>
-
-          <div style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-top:0.85rem;">
-            ${t.registrations
-              .map(
-                (r) => `
-                <span class="badge badge-pool-${r.pool}" title="Chapeau ${r.pool}">
-                  ${escapeHtml(r.display_name)} (Ch.${r.pool})
-                </span>
-              `
-              )
-              .join('')}
-          </div>
-          ${teamsHtml}
+      const mine = t.registrations.some((r) => r.user_id === myId);
+      const teams = teamsOf(t);
+      return `<article class="hgw-card">
+        <div class="hgw-card__head">
+          <div class="row" style="gap: var(--space-3); flex-wrap: nowrap">${monogram({ name: tName(t) })}
+            <div><h2 class="hgw-card__title">${esc(tName(t))}</h2><p class="hgw-card__desc">${esc(plain(t.scheduled_label))}</p></div></div>
+          <span class="hgw-badge hgw-badge--points">1er · ${t.points_scale['1']}</span>
         </div>
-      `;
+        <p class="muted">${esc(plain(t.mode_label))}</p>
+        <div class="row-between" style="margin-top: var(--space-4)">
+          <span class="small muted">${t.registrations.length} inscrit${t.registrations.length > 1 ? 's' : ''}</span>
+          <button type="button" class="hgw-btn ${mine ? 'hgw-btn--secondary' : 'hgw-btn--primary'} hgw-btn--sm" data-toggle-t="${esc(t.id)}">${mine ? `${icon('check')}Inscrit · se désinscrire` : 'M’inscrire'}</button>
+        </div>
+        ${t.registrations.length ? `<div class="row" style="margin-top: var(--space-3)">${t.registrations.map((r) => `<span class="hgw-badge" title="Chapeau ${r.pool}">${esc(r.display_name)}${t.id === 'rl_rumble' ? ` · C${r.pool}` : ''}</span>`).join('')}</div>` : ''}
+        ${
+          teams.length
+            ? `<div style="margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--line-subtle)">
+                <div class="hgw-stat__label" style="margin-bottom: var(--space-2)">Équipes</div>
+                <div class="grid-auto" style="grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--space-2)">${teams
+                  .map((tm) => `<div class="hgw-stat"><div class="body-strong" style="font-weight:600">${esc(tm.name)}</div>${tm.members.map((mm) => `<div class="row-between small"><span>${esc(mm.display_name)}</span><span class="faint hgw-num">C${mm.pool}</span></div>`).join('')}</div>`)
+                  .join('')}</div></div>`
+            : ''
+        }
+      </article>`;
     })
     .join('');
+  $('tournaments-grid').querySelectorAll('[data-toggle-t]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      if (!appState.user) return openLogin();
+      b.disabled = true;
+      const { ok, data } = await api(`/api/tournaments/${b.dataset.toggleT}/toggle`, { method: 'POST' });
+      if (!ok) {
+        b.disabled = false;
+        return toastError(data);
+      }
+      toast({ title: data.registered ? 'Inscription confirmée' : 'Inscription retirée', type: 'success' });
+      fetchState();
+    })
+  );
+}
 
-  grid.querySelectorAll('.toggle-tourney-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      if (!appState.user) {
-        document.getElementById('login-modal').classList.add('open');
-        return;
-      }
-      const res = await fetch(`/api/tournaments/${btn.dataset.id}/toggle`, { method: 'POST' });
-      const data = await res.json();
-      if (res.ok) {
-        showToast(data.registered ? '✅ Inscription au tournoi confirmée !' : 'Inscription retirée.');
-        await fetchState();
-      }
-    });
+// ============================================================================
+// DIALOGUES JOUEUR
+// ============================================================================
+let pastedProofFile = null;
+
+function openProof(id) {
+  const q = (appState.myDailyQuests || []).find((x) => x.id === id);
+  if (!q) return;
+  pastedProofFile = null;
+  $('proof-form').reset();
+  $('proof-assignment-id').value = id;
+  $('proof-title').textContent = q.status === 'rejected' ? 'Renvoyer une preuve' : 'Envoyer ma preuve';
+  $('proof-context').textContent = `${plain(q.title)} · ${q.game_name} · +${q.points} pts`;
+  $('proof-hint').innerHTML = `${icon('info')}<span>${esc(plain(q.proof_hint) || 'Capture de l’écran de fin de partie ou clip court.')}</span>`;
+  $('proof-preview').hidden = true;
+  $('proof-drop-title').textContent = 'Colle une capture (Ctrl+V) ou glisse un fichier';
+  $('proof-drop').classList.remove('is-over');
+  $('proof-error').textContent = '';
+  $('proof-dialog').showModal();
+}
+
+function setProofFile(file) {
+  pastedProofFile = file;
+  $('proof-drop-title').textContent = `${file.name} · ${Math.round(file.size / 1024)} Ko`;
+  $('proof-drop').classList.add('is-over');
+  $('proof-error').textContent = '';
+  if (file.type.startsWith('image/')) {
+    const r = new FileReader();
+    r.onload = (ev) => {
+      $('proof-preview').src = ev.target.result;
+      $('proof-preview').hidden = false;
+    };
+    r.readAsDataURL(file);
+  } else {
+    $('proof-preview').hidden = true;
+  }
+}
+
+async function openLedger(userId) {
+  const { ok, data } = await api(`/api/player/${encodeURIComponent(userId)}/ledger`);
+  if (!ok) return toastError(data);
+  const isMe = userId === appState.user?.id;
+  const total = (data.entries || []).reduce((s, e) => s + e.points, 0);
+  $('ledger-title').textContent = isMe ? 'Mon historique de points' : data.player.display_name;
+  $('ledger-sub').textContent = `${fmt(total)} pts au total`;
+  $('ledger-games').innerHTML = (data.selectedGames || []).map((g) => `<span class="hgw-badge">${esc(g.short_name)}</span>`).join('');
+  $('ledger-entries').innerHTML = (data.entries || []).length
+    ? data.entries
+        .map(
+          (e) => `<div class="feed__item"><div><div class="feed__who" style="font-weight:500">${esc(plain(e.label))}</div><div class="feed__what">${e.category === 'live' ? 'Week-end live' : 'Quinzaine'} · ${esc(timeAgo(e.updated_at))}</div></div><span class="hgw-badge hgw-badge--points">${signed(e.points)}</span></div>`
+        )
+        .join('')
+    : `<div class="hgw-empty"><strong>Aucun point pour l’instant</strong>${isMe ? 'Relève un défi pour marquer tes premiers points.' : ''}</div>`;
+  $('ledger-dialog').showModal();
+}
+
+// ============================================================================
+// ADMIN
+// ============================================================================
+function renderAdmin() {
+  if (appState.user?.is_admin !== 1) return;
+  const pending = visibleProofs().length;
+  const panes = [
+    ['/admin', 'moderation', 'shield', 'Modération', pending],
+    ['/admin/evenement', 'evenement', 'calendar', 'Événement', 0],
+    ['/admin/tournois', 'tournois', 'swords', 'Tournois', 0],
+    ['/admin/points', 'points', 'gift', 'Points et tombola', 0],
+  ];
+  $('admin-nav').innerHTML =
+    panes.map(([href, id, ic, label, n]) => `<a href="${href}" data-link ${route.pane === id ? 'aria-current="page"' : ''}>${icon(ic)}${label}${n ? `<span class="hgw-tab__count">${n}</span>` : ''}</a>`).join('') +
+    `<div class="admin-nav__sep"></div><a href="/admin/maintenance" data-link ${route.pane === 'maintenance' ? 'aria-current="page"' : ''}>${icon('wrench')}Maintenance</a>`;
+  const p = phaseInfo();
+  $('admin-desc').textContent = `${p.label}${p.day ? ` · jour ${p.day}` : ''}${p.manual ? ' · phase forcée manuellement' : ''}`;
+
+  renderKpis();
+  renderReview();
+  renderSettings();
+  renderAdminTournaments();
+  renderManualPoints();
+  $('tombola-desc').textContent = `${(appState.leaderboard || []).filter((x) => x.tombola_eligible).length} joueurs qualifiés (300 pts et plus).`;
+  $('dev-tools').hidden = !appState.devMode;
+}
+
+function renderKpis() {
+  const s = appState.admin?.stats;
+  if (!s) return;
+  const pending = visibleProofs().length;
+  $('admin-kpis').innerHTML = `
+    <button type="button" class="hgw-stat ${pending ? 'kpi--action' : ''}" id="kpi-pending" style="${pending ? '' : 'border:0;text-align:left;color:inherit;font:inherit'}">
+      <div class="hgw-stat__label">Preuves à vérifier</div><div class="hgw-stat__value">${pending}</div><div class="hgw-stat__meta">${pending ? 'Commencer la modération' : 'Tout est à jour'}</div>
+    </button>
+    <div class="hgw-stat"><div class="hgw-stat__label">Joueurs</div><div class="hgw-stat__value">${fmt(s.totalUsers)}</div><div class="hgw-stat__meta">${fmt(s.tombolaQualifiedCount)} qualifiés tombola</div></div>
+    <div class="hgw-stat"><div class="hgw-stat__label">Défis validés</div><div class="hgw-stat__value">${fmt(s.totalValidatedQuests)}</div></div>
+    <div class="hgw-stat"><div class="hgw-stat__label">Points distribués</div><div class="hgw-stat__value">${fmt(s.totalPoints)}</div><div class="hgw-stat__meta">${fmt(s.totalReplays)} replays Trackmania</div></div>`;
+  $('kpi-pending').addEventListener('click', () => $('review-zone').querySelector('[data-decide="approve"]')?.focus());
+}
+
+function visibleProofs() {
+  return (appState.admin?.pendingProofs || []).filter((p) => !decidedProofs.has(p.id));
+}
+
+function renderReview() {
+  const list = visibleProofs();
+  const zone = $('review-zone');
+  if (!list.length) {
+    zone.innerHTML = emptyCard('Aucune preuve en attente', 'Tout est à jour. Les nouvelles preuves arrivent aussi dans #preuves sur Discord.');
+    return;
+  }
+  if (reviewIndex >= list.length) reviewIndex = 0;
+  const p = list[reviewIndex];
+  const isImg = p.proof_file && /\.(png|jpe?g|webp|gif)$/i.test(p.proof_file);
+  const fileUrl = p.proof_file ? `/uploads/proofs/${encodeURIComponent(p.proof_file)}` : '';
+  const media = isImg
+    ? `<button type="button" class="hgw-review__media review-media" id="review-zoom" aria-label="Agrandir la capture"><img src="${fileUrl}" alt="Preuve de ${esc(p.display_name)}" /></button>`
+    : `<div class="hgw-review__media">${p.proof_file ? `<a href="${fileUrl}" target="_blank" rel="noopener">${icon('play')} Ouvrir le fichier</a>` : p.proof_url ? `<a href="${esc(p.proof_url)}" target="_blank" rel="noopener noreferrer">${icon('external')} Ouvrir le lien</a>` : 'Aucun fichier'}</div>`;
+  zone.innerHTML = `
+    <div class="hgw-review">
+      ${media}
+      <div>
+        <div class="hgw-review__meta">${avatar(p)}<b style="color:var(--ink-1)">${esc(p.display_name)}</b><span>· ${esc(p.game_name)} · ${esc(timeAgo(p.submitted_at))}</span>
+          <span class="hgw-badge hgw-badge--points">+${p.points}</span>${diffPips(p.difficulty)}
+          <span class="hgw-review__queue" style="margin-left:auto">${reviewIndex + 1} / ${list.length}</span></div>
+        <h3 class="hgw-review__title">${esc(plain(p.title))}</h3>
+        <p class="muted"><b style="color:var(--ink-1)">Consigne :</b> ${esc(plain(p.description))}</p>
+        ${p.proof_url && p.proof_file ? `<p class="small" style="margin-top: var(--space-2)"><a href="${esc(p.proof_url)}" target="_blank" rel="noopener noreferrer">Lien joint</a></p>` : ''}
+        ${p.proof_note ? `<p class="small muted" style="margin-top: var(--space-2)">Note du joueur : « ${esc(p.proof_note)} »</p>` : ''}
+        <div class="hgw-review__actions">
+          <button type="button" class="hgw-btn hgw-btn--primary hgw-btn--sm" data-decide="approve">Valider <span class="hgw-btn__kbd">V</span></button>
+          <button type="button" class="hgw-btn hgw-btn--danger hgw-btn--sm" data-decide="reject">Refuser… <span class="hgw-btn__kbd">R</span></button>
+          <button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--sm" data-decide="skip" ${list.length < 2 ? 'disabled' : ''}>Passer <span class="hgw-btn__kbd">→</span></button>
+        </div>
+        <p class="review-keys">Chaque décision peut être annulée pendant 5 secondes.</p>
+      </div>
+    </div>`;
+  $('review-zoom')?.addEventListener('click', () => openLightbox(fileUrl, `${p.display_name} · ${plain(p.title)}`));
+  zone.querySelectorAll('[data-decide]').forEach((b) => b.addEventListener('click', () => decide(b.dataset.decide)));
+}
+
+function decide(kind) {
+  const list = visibleProofs();
+  const p = list[reviewIndex];
+  if (!p) return;
+  if (kind === 'skip') {
+    reviewIndex = (reviewIndex + 1) % list.length;
+    return renderReview();
+  }
+  if (kind === 'reject') return openReject(p);
+  queueDecision(p, { action: 'approve' });
+}
+
+function queueDecision(p, body) {
+  decidedProofs.add(p.id);
+  const send = async () => {
+    pendingDecisions.delete(p.id);
+    const { ok, data } = await api(`/api/admin/proofs/${p.id}/review`, { json: body });
+    if (!ok) {
+      decidedProofs.delete(p.id);
+      toastError(data, 'La décision n’a pas pu être enregistrée.');
+    }
+    scheduleFetch();
+  };
+  const timer = setTimeout(send, 5000);
+  pendingDecisions.set(p.id, { timer, send, p, body });
+  renderAdmin();
+  renderUser();
+  toast({
+    title: body.action === 'approve' ? `Validé · +${p.points} pts pour ${p.display_name}` : `Refusé · ${p.display_name}`,
+    type: body.action === 'approve' ? 'success' : 'info',
+    duration: 5000,
+    action: {
+      label: 'Annuler',
+      fn: () => {
+        const pd = pendingDecisions.get(p.id);
+        if (pd) clearTimeout(pd.timer);
+        pendingDecisions.delete(p.id);
+        decidedProofs.delete(p.id);
+        renderAdmin();
+        renderUser();
+      },
+    },
   });
 }
 
-/**
- * Mode Show Stream Plein Écran (Révélation dramatique joueur par joueur : Chapeau 3 -> Chapeau 2 -> Capitaines Chapeau 1)
- */
-function openStreamRevealStage() {
+function flushDecisions() {
+  for (const [id, pd] of pendingDecisions) {
+    clearTimeout(pd.timer);
+    fetch(`/api/admin/proofs/${id}/review`, { method: 'POST', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(pd.body) });
+  }
+  pendingDecisions.clear();
+}
+window.addEventListener('pagehide', flushDecisions);
+
+let rejectTarget = null;
+function openReject(p) {
+  rejectTarget = p;
+  $('reject-form').reset();
+  $('reject-title').textContent = `Refuser la preuve de ${p.display_name}`;
+  $('reject-reasons').innerHTML = REJECT_REASONS.map((r, i) => `<button type="button" class="reason" data-reason="${i}" aria-pressed="false"><kbd>${i + 1}</kbd>${esc(r)}</button>`).join('');
+  $('reject-reasons').querySelectorAll('[data-reason]').forEach((b) => b.addEventListener('click', () => pickReason(Number(b.dataset.reason))));
+  $('reject-dialog').showModal();
+  $('reject-reasons').querySelector('[data-reason]')?.focus();
+}
+function pickReason(i) {
+  if (!REJECT_REASONS[i]) return;
+  $('reject-text').value = REJECT_REASONS[i];
+  $('reject-reasons').querySelectorAll('[data-reason]').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.reason) === i)));
+}
+
+function openLightbox(src, caption) {
+  $('lightbox-img').src = src;
+  $('lightbox-img').alt = caption;
+  $('lightbox-cap').textContent = caption;
+  $('lightbox').showModal();
+}
+
+function toLocalInput(v) {
+  return v ? String(v).slice(0, 16) : '';
+}
+
+function renderSettings() {
+  const cfg = appState.eventSettings;
+  if (!cfg) return;
+  const p = phaseInfo();
+  $('settings-phase').textContent = `${p.label}${p.manual ? ' · forcée' : ''}`;
+  $('settings-phase').className = `hgw-badge ${p.manual ? 'hgw-badge--danger' : ''}`;
+  if (settingsDirty) return;
+  $('cfg-start-at').value = toLocalInput(cfg.start_at);
+  $('cfg-week2-start-at').value = toLocalInput(cfg.week2_start_at);
+  $('cfg-tmnf-cutoff-at').value = toLocalInput(cfg.tmnf_cutoff_at);
+  $('cfg-end-at').value = toLocalInput(cfg.end_at);
+  $('cfg-playit-addr').value = cfg.tmnf_playit_address || '';
+  const weekly = (appState.tmnfMaps || []).find((m) => m.is_weekly);
+  $('cfg-weekly-uid').value = weekly?.uid || '';
+  const manual = cfg.status_mode && cfg.status_mode !== 'auto';
+  $('cfg-manual').checked = manual;
+  $('cfg-manual-field').hidden = !manual;
+  $('cfg-status-mode').value = cfg.status_mode === 'live' ? 'week2' : manual ? cfg.status_mode : 'week1';
+}
+
+function validateSettings() {
+  const v = (id) => Date.parse($(id).value);
+  const [a, b, c, d] = ['cfg-start-at', 'cfg-week2-start-at', 'cfg-tmnf-cutoff-at', 'cfg-end-at'].map(v);
+  document.querySelectorAll('#settings-form .hgw-field').forEach((f) => f.classList.remove('hgw-field--error'));
+  const fail = (id, msg) => {
+    $(id).closest('.hgw-field').classList.add('hgw-field--error');
+    $('settings-error').textContent = msg;
+    $(id).focus();
+    return false;
+  };
+  if (![a, b, c, d].every(Number.isFinite)) return fail('cfg-start-at', 'Renseigne les quatre dates.');
+  if (b <= a) return fail('cfg-week2-start-at', 'L’acte II doit commencer après l’acte I.');
+  if (c <= b) return fail('cfg-tmnf-cutoff-at', 'La fin du chrono serveur doit être après le début de l’acte II.');
+  if (d < c) return fail('cfg-end-at', 'La fin de l’événement doit être après la fin du chrono serveur.');
+  $('settings-error').textContent = '';
+  return true;
+}
+
+function renderAdminTournaments() {
+  const ts = appState.tournaments || [];
+  if (!ts.find((t) => t.id === adminTourneyId) && ts[0]) adminTourneyId = ts[0].id;
+  $('admin-tourney-seg').innerHTML = ts.map((t) => `<button type="button" data-t="${esc(t.id)}" aria-pressed="${t.id === adminTourneyId}">${esc(tName(t))} <span class="hgw-seg__n">${t.registrations.length}</span></button>`).join('');
+  $('admin-tourney-seg').querySelectorAll('[data-t]').forEach((b) =>
+    b.addEventListener('click', () => {
+      adminTourneyId = b.dataset.t;
+      renderAdminTournaments();
+    })
+  );
+  const t = ts.find((x) => x.id === adminTourneyId);
+  const tbody = $('admin-pools-tbody');
+  if (!t || !t.registrations.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="hgw-empty"><strong>Aucun inscrit</strong>Les joueurs s’inscrivent depuis l’onglet Tournois.</div></td></tr>`;
+  } else {
+    tbody.innerHTML = t.registrations
+      .map(
+        (r) => `<tr>
+        <td class="hgw-player__name">${esc(r.display_name)}</td>
+        <td><label class="hgw-sr" for="pool-${esc(r.user_id)}">Chapeau de ${esc(r.display_name)}</label>
+          <select id="pool-${esc(r.user_id)}" class="hgw-input compact" data-pool="${esc(r.user_id)}">${[1, 2, 3].map((n) => `<option value="${n}" ${r.pool === n ? 'selected' : ''}>Chapeau ${n}</option>`).join('')}</select></td>
+        <td><input type="checkbox" class="check" data-checkin="${esc(r.user_id)}" ${r.checked_in ? 'checked' : ''} aria-label="${esc(r.display_name)} présent" /></td>
+        <td class="small">${r.team_name ? esc(plain(r.team_name)) : '<span class="faint">—</span>'}</td>
+        <td><label class="hgw-sr" for="place-${esc(r.user_id)}">Place de ${esc(r.display_name)}</label>
+          <select id="place-${esc(r.user_id)}" class="hgw-input compact" data-place="${esc(r.user_id)}">${PLACEMENTS.map(([v, l]) => `<option value="${v}" ${String(r.placement ?? '') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
+      </tr>`
+      )
+      .join('');
+    tbody.querySelectorAll('[data-pool]').forEach((s) =>
+      s.addEventListener('change', async () => {
+        const { ok, data } = await api(`/api/admin/tournaments/${adminTourneyId}/player`, { json: { userId: s.dataset.pool, pool: Number(s.value) } });
+        if (!ok) toastError(data);
+        scheduleFetch();
+      })
+    );
+    tbody.querySelectorAll('[data-checkin]').forEach((c) =>
+      c.addEventListener('change', async () => {
+        const { ok, data } = await api(`/api/admin/tournaments/${adminTourneyId}/player`, { json: { userId: c.dataset.checkin, checkedIn: c.checked } });
+        if (!ok) toastError(data);
+        scheduleFetch();
+      })
+    );
+  }
+
+  const fg = ts.find((x) => x.id === 'fall_guys');
+  const opts = [
+    [0, '0'],
+    [1, '1 · éliminé'],
+    [3, '3 · qualifié'],
+    [6, '6 · finale'],
+    [10, '10 · couronne'],
+  ];
+  $('admin-fg-tbody').innerHTML =
+    fg && fg.registrations.length
+      ? fg.registrations
+          .map((r) => {
+            const shows = r.fg_shows || [0, 0, 0, 0, 0];
+            return `<tr data-fg="${esc(r.user_id)}"><td class="hgw-player__name">${esc(r.display_name)}</td>${[0, 1, 2, 3, 4]
+              .map((i) => `<td><select class="hgw-input compact" data-show="${i}" aria-label="Partie ${i + 1} de ${esc(r.display_name)}">${opts.map(([v, l]) => `<option value="${v}" ${shows[i] === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>`)
+              .join('')}<td class="r hgw-num">${r.fg_total_score || 0}</td><td class="r"><span class="hgw-badge hgw-badge--points">+${r.points_awarded || 0}</span></td></tr>`;
+          })
+          .join('')
+      : `<tr><td colspan="8"><div class="hgw-empty"><strong>Aucun inscrit à Fall Guys</strong></div></td></tr>`;
+}
+
+function renderManualPoints() {
+  const sel = $('mp-user');
+  const users = appState.admin?.allUsers || [];
+  const current = sel.value;
+  sel.innerHTML = users.map((u) => `<option value="${esc(u.id)}">${esc(u.display_name)} (@${esc(u.username)})</option>`).join('');
+  if (current) sel.value = current;
+  updateManualPreview();
+}
+
+function updateManualPreview() {
+  const uid = $('mp-user').value;
+  const amount = Math.round(Number($('mp-amount').value));
+  const lb = appState?.leaderboard || [];
+  const player = lb.find((p) => p.id === uid);
+  const user = (appState?.admin?.allUsers || []).find((u) => u.id === uid);
+  if (!user || !Number.isFinite(amount) || amount === 0) {
+    $('mp-preview').innerHTML = `<span class="faint">Choisis un joueur et un montant non nul.</span>`;
+    return;
+  }
+  const before = player?.total_points || 0;
+  const after = before + amount;
+  const newRank = lb.filter((p) => p.id !== uid && p.total_points > after).length + 1;
+  $('mp-preview').innerHTML = `<b>${esc(user.display_name)}</b> : <span class="hgw-num">${fmt(before)} → ${fmt(after)}</span> pts · ${player ? `rang ${player.rank} → ${newRank}` : `entre au rang ${newRank}`}`;
+}
+
+// ============================================================================
+// SCÈNES STREAM
+// ============================================================================
+function openTeamsStage() {
   const rl = (appState?.tournaments || []).find((t) => t.id === 'rl_rumble');
   if (!rl) return;
-
-  const overlay = document.getElementById('stream-stage-overlay');
-  const poolsOverview = document.getElementById('stream-pools-overview');
-  const teamsStage = document.getElementById('stream-teams-stage');
-
-  const p1 = rl.registrations.filter((r) => r.pool === 1);
-  const p2 = rl.registrations.filter((r) => r.pool === 2);
-  const p3 = rl.registrations.filter((r) => r.pool === 3);
-
-  poolsOverview.innerHTML = [
-    { title: '🔥 Chapeau 1 (Tryhard / Capitaines)', badge: 'badge-pool-1', list: p1 },
-    { title: '⚡ Chapeau 2 (Intermédiaire)', badge: 'badge-pool-2', list: p2 },
-    { title: '🌱 Chapeau 3 (Chill)', badge: 'badge-pool-3', list: p3 },
-  ]
-    .map(
-      (col) => `
-      <div class="card" style="padding:1rem;">
-        <div style="font-weight:700;font-size:0.9rem;margin-bottom:0.5rem;">${col.title}</div>
-        <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
-          ${col.list.map((p) => `<span class="badge ${col.badge}">${escapeHtml(p.display_name)}</span>`).join('')}
-        </div>
-      </div>
-    `
-    )
+  const pools = [1, 2, 3].map((n) => rl.registrations.filter((r) => r.pool === n));
+  $('stage-pools').innerHTML = pools
+    .map((list, i) => `<div class="hgw-card hgw-card--flat"><div class="hgw-stat__label" style="margin-bottom: var(--space-2)">Chapeau ${i + 1}</div><div class="row">${list.map((p) => `<span class="hgw-badge">${esc(p.display_name)}</span>`).join('') || '<span class="faint small">Vide</span>'}</div></div>`)
     .join('');
-
-  const teamsMap = new Map();
-  for (const r of rl.registrations) {
-    if (r.team_number) {
-      if (!teamsMap.has(r.team_number)) {
-        teamsMap.set(r.team_number, { num: r.team_number, name: r.team_name, members: [] });
-      }
-      teamsMap.get(r.team_number).members.push(r);
-    }
-  }
-
-  const teams = Array.from(teamsMap.values());
-  streamRevealQueue = [];
-  streamRevealIndex = 0;
-
-  // Construire les cartes d'équipes avec des slots masqués
-  teamsStage.innerHTML = teams
-    .map((tm) => {
-      // Trier les membres du Chapeau 3 vers le Chapeau 1 pour garder le suspense des capitaines à la fin
-      const sortedMembers = [...tm.members].sort((a, b) => b.pool - a.pool);
-      return `
-        <div class="card" style="background:var(--bg-surface);">
-          <div class="card-header">
-            <strong class="card-title" style="color:var(--accent-gold);">${escapeHtml(tm.name)}</strong>
-            <span class="mono" style="font-size:0.75rem;color:var(--text-muted);">Équipe #${tm.num}</span>
-          </div>
-          <div>
-            ${sortedMembers
-              .map((m, idx) => {
-                const slotId = `stream-slot-${tm.num}-${idx}`;
-                streamRevealQueue.push({
-                  slotId,
-                  name: m.display_name,
-                  pool: m.pool,
-                });
-                return `
-                  <div class="stream-slot hidden-slot" id="${slotId}">
-                    <span>❓ En attente du tirage (Chapeau ${m.pool})</span>
-                    <span class="badge badge-pool-${m.pool}">Ch.${m.pool}</span>
-                  </div>
-                `;
-              })
-              .join('')}
-          </div>
-        </div>
-      `;
-    })
-    .join('');
-
-  // Trier l'ordre de révélation pour révéler tous les Chapeaux 3 d'abord, puis Chapeaux 2, puis Capitaines Chapeau 1
-  streamRevealQueue.sort((a, b) => b.pool - a.pool);
-
-  overlay.classList.add('open');
+  const teams = teamsOf(rl);
+  stageQueue = [];
+  stageIndex = 0;
+  $('stage-teams').innerHTML = teams.length
+    ? teams
+        .map(
+          (tm) => `<div class="hgw-card"><div class="hgw-card__head"><h3 class="hgw-card__title t-gold" style="font-size:20px">${esc(tm.name)}</h3></div>${[...tm.members]
+            .sort((a, b) => b.pool - a.pool)
+            .map((m, i) => {
+              const id = `slot-${tm.num}-${i}`;
+              stageQueue.push({ id, name: m.display_name, pool: m.pool });
+              return `<div class="slot" id="${id}"><span>Chapeau ${m.pool} · à révéler</span><span class="hgw-num faint">C${m.pool}</span></div>`;
+            })
+            .join('')}</div>`
+        )
+        .join('')
+    : `<div class="hgw-empty"><strong>Pas encore d’équipes</strong>Tire les équipes depuis l’admin, puis rouvre la scène.</div>`;
+  stageQueue.sort((a, b) => b.pool - a.pool);
+  $('teams-stage').classList.add('is-open');
+  $('stage-next-btn').focus();
 }
 
-function revealNextStreamSlot() {
-  if (streamRevealIndex >= streamRevealQueue.length) {
-    showToast('🎉 Toutes les équipes ont été révélées !');
-    return;
-  }
-  const item = streamRevealQueue[streamRevealIndex++];
-  const el = document.getElementById(item.slotId);
-  if (el) {
-    el.className = 'stream-slot revealed-slot';
-    el.innerHTML = `
-      <strong>👤 ${escapeHtml(item.name)}</strong>
-      <span class="badge badge-pool-${item.pool}">Chapeau ${item.pool}</span>
-    `;
-  }
+function revealNext() {
+  const item = stageQueue[stageIndex];
+  if (!item) return toast({ title: 'Toutes les équipes sont révélées', type: 'success' });
+  stageIndex++;
+  const el = $(item.id);
+  if (!el) return;
+  el.className = 'slot is-revealed';
+  el.innerHTML = `<span>${esc(item.name)}</span><span class="hgw-badge">Chapeau ${item.pool}</span>`;
 }
 
-/**
- * Scène Plein Écran pour la Roue / Slot Machine de la Grande Tombola (≥ 300 pts)
- */
 function openTombolaStage() {
-  const overlay = document.getElementById('tombola-stage-overlay');
-  const grid = document.getElementById('tombola-candidates-grid');
-  const display = document.getElementById('tombola-wheel-display');
-  const status = document.getElementById('tombola-wheel-status');
-
   const qualified = (appState?.leaderboard || []).filter((p) => p.tombola_eligible);
-  status.textContent = `🎟️ ${qualified.length} joueur(s) qualifié(s) dans l'urne (≥ 300 pts)`;
-
-  if (qualified.length === 0) {
-    display.innerHTML = `<span style="color:var(--text-muted);font-size:1.3rem;">Aucun joueur n'a encore atteint 300 pts</span>`;
-    grid.innerHTML = '';
-  } else {
-    display.innerHTML = `Clique sur « 🎰 Lancer la Roue » !`;
-    grid.innerHTML = qualified
-      .map(
-        (p) => `
-        <div
-          class="badge badge-easy tombola-candidate-chip"
-          data-uid="${p.id}"
-          style="font-size:0.92rem;padding:0.5rem 0.9rem;transition:all 0.12s ease;"
-        >
-          🎟️ <strong>${escapeHtml(p.display_name)}</strong> <span class="mono" style="margin-left:4px;">(${p.total_points} pts)</span>
-        </div>
-      `
-      )
-      .join('');
-  }
-
-  overlay.classList.add('open');
+  $('tombola-status').textContent = `${qualified.length} joueur${qualified.length > 1 ? 's' : ''} dans l’urne · 300 pts et plus`;
+  $('tombola-wheel').className = 'wheel';
+  $('tombola-wheel').textContent = qualified.length ? 'Prêt pour le tirage' : 'Personne n’a encore atteint 300 pts';
+  $('tombola-spin-btn').disabled = !qualified.length;
+  $('tombola-candidates').innerHTML = qualified.map((p) => `<span class="candidate" data-uid="${esc(p.id)}">${esc(p.display_name)} <span class="faint hgw-num">${p.total_points}</span></span>`).join('');
+  $('tombola-stage').classList.add('is-open');
+  $('tombola-spin-btn').focus();
 }
 
-async function spinTombolaWheel() {
+async function spinTombola() {
   if (tombolaSpinning) return;
-  const res = await fetch('/api/admin/tombola/draw', { method: 'POST' });
-  const data = await res.json();
-  if (!res.ok) {
-    showToast(`❌ ${data.error}`);
-    return;
-  }
-
-  const candidates = data.candidates || [];
-  const winner = data.winner;
-  const display = document.getElementById('tombola-wheel-display');
-  const status = document.getElementById('tombola-wheel-status');
-  const chips = Array.from(document.querySelectorAll('.tombola-candidate-chip'));
-
   tombolaSpinning = true;
-  status.textContent = '🎰 TIRAGE EN COURS...';
-
-  const totalSteps = 34;
-  for (let step = 0; step < totalSteps; step++) {
-    const pick =
-      step === totalSteps - 1
-        ? winner
-        : candidates[(step + Math.floor(Math.random() * candidates.length)) % candidates.length];
-
-    chips.forEach((c) => {
-      const active = c.dataset.uid === pick.id;
-      c.style.transform = active ? 'scale(1.14)' : 'scale(1)';
-      c.style.boxShadow = active ? '0 0 20px var(--accent-gold)' : 'none';
-      c.style.borderColor = active ? 'var(--accent-gold)' : '';
-    });
-
-    if (step < totalSteps - 1) {
-      display.innerHTML = `<span style="color:var(--text-primary);">🎲 ${escapeHtml(pick.display_name)}</span>`;
-      const delayMs = Math.round(45 + Math.pow(step / totalSteps, 2.3) * 290);
-      await new Promise((r) => setTimeout(r, delayMs));
-    } else {
-      display.innerHTML = `
-        <div>
-          <div style="font-size:0.9rem;color:var(--accent-emerald);margin-bottom:0.2rem;">🏆 GAGNANT DE LA GRANDE TOMBOLA HGW 🏆</div>
-          <div style="color:var(--accent-gold);text-shadow:0 0 25px hsla(43,96%,58%,0.5);">
-            🎉 ${escapeHtml(winner.display_name)} (${winner.total_points} pts) 🎉
-          </div>
-        </div>
-      `;
-      status.textContent = '🎊 Tirage officiel terminé et diffusé en direct !';
+  $('tombola-spin-btn').disabled = true;
+  const { ok, data } = await api('/api/admin/tombola/draw', { method: 'POST' });
+  if (!ok) {
+    tombolaSpinning = false;
+    $('tombola-spin-btn').disabled = false;
+    return toastError(data);
+  }
+  const wheel = $('tombola-wheel');
+  const chips = [...document.querySelectorAll('#tombola-candidates .candidate')];
+  const cands = data.candidates || [];
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  $('tombola-status').textContent = 'Tirage en cours…';
+  if (!reduced && cands.length > 1) {
+    const steps = 34;
+    for (let i = 0; i < steps - 1; i++) {
+      const pick = cands[Math.floor(Math.random() * cands.length)];
+      chips.forEach((c) => c.classList.toggle('is-hot', c.dataset.uid === pick.id));
+      wheel.textContent = pick.display_name;
+      await new Promise((r) => setTimeout(r, Math.round(45 + Math.pow(i / steps, 2.3) * 290)));
     }
   }
-
-  const box = document.getElementById('admin-tombola-winner-box');
-  if (box) {
-    box.style.display = 'block';
-    box.innerHTML = `
-      🎉 <strong>GAGNANT TIRÉ AU SORT (${data.eligibleCount} qualifiés ≥ 300 pts) :</strong>
-      <div style="font-family:var(--font-display);font-size:1.35rem;color:var(--accent-gold);margin-top:0.2rem;">
-        🎟️ ${escapeHtml(winner.display_name)} (${winner.total_points} pts)
-      </div>
-    `;
-  }
-
+  chips.forEach((c) => c.classList.toggle('is-hot', c.dataset.uid === data.winner.id));
+  wheel.className = 'wheel is-winner';
+  wheel.innerHTML = `<div><div class="hgw-stat__label" style="margin-bottom: var(--space-2)">Gagnant de la tombola</div>${esc(data.winner.display_name)}</div>`;
+  $('tombola-status').textContent = `Tiré parmi ${data.eligibleCount} qualifié${data.eligibleCount > 1 ? 's' : ''}`;
   tombolaSpinning = false;
-}
-
-function renderAdmin() {
-  // 1. KPIs Admin
-  const stats = appState.admin?.stats;
-  const kpisGrid = document.getElementById('admin-kpis-grid');
-  if (kpisGrid && stats) {
-    const items = [
-      { label: 'Joueurs Inscrits', val: stats.totalPlayers, color: 'var(--text-primary)' },
-      { label: 'Preuves en Attente', val: stats.pendingProofsCount, color: stats.pendingProofsCount > 0 ? 'var(--accent-gold)' : 'var(--accent-emerald)' },
-      { label: 'Défis Validés', val: stats.validatedQuestsCount, color: 'var(--accent-emerald)' },
-      { label: 'Replays .gbx Validés', val: stats.totalGbxSubmissions, color: 'var(--accent-sky)' },
-      { label: 'Points Distribués', val: `${stats.totalPointsDistributed} pts`, color: 'var(--accent-gold)' },
-      { label: 'Qualifiés Tombola (≥300)', val: stats.tombolaQualifiedCount, color: 'var(--accent-emerald)' },
-    ];
-    kpisGrid.innerHTML = items
-      .map(
-        (k) => `
-        <div class="card" style="padding:0.9rem 1rem;">
-          <div style="font-size:0.72rem;text-transform:uppercase;color:var(--text-muted);font-weight:700;">${k.label}</div>
-          <div class="mono" style="font-size:1.35rem;font-weight:700;color:${k.color};margin-top:0.2rem;">${k.val}</div>
-        </div>
-      `
-      )
-      .join('');
-  }
-
-  // 2. Paramètres Dates & Phase de la HGW
-  const cfg = appState.eventSettings;
-  if (cfg) {
-    const badgeEl = document.getElementById('admin-phase-badge');
-    if (badgeEl) {
-      const mapBadge = {
-        registration: { text: '⏳ Phase : Inscriptions', cls: 'badge-medium' },
-        live: { text: '🟢 Phase : EN COURS (Live)', cls: 'badge-easy' },
-        closed: { text: '🏁 Phase : Clôturée', cls: 'badge-hard' },
-      };
-      const b = mapBadge[cfg.effective_phase] || mapBadge.live;
-      badgeEl.className = `badge ${b.cls}`;
-      badgeEl.textContent = b.text;
-    }
-
-    const toLocalInput = (iso) => (iso ? String(iso).slice(0, 16) : '');
-    const modeInput = document.getElementById('cfg-status-mode');
-    const startInput = document.getElementById('cfg-start-at');
-    const cutoffInput = document.getElementById('cfg-tmnf-cutoff-at');
-    const endInput = document.getElementById('cfg-end-at');
-    const playitInput = document.getElementById('cfg-playit-addr');
-    const weeklyMapObj = (appState.tmnfMaps || []).find((m) => m.is_weekly);
-    const weeklyUidInput = document.getElementById('cfg-weekly-uid');
-
-    if (modeInput) modeInput.value = cfg.status_mode || 'auto';
-    if (startInput) startInput.value = toLocalInput(cfg.start_at);
-    if (cutoffInput) cutoffInput.value = toLocalInput(cfg.tmnf_cutoff_at);
-    if (endInput) endInput.value = toLocalInput(cfg.end_at);
-    if (playitInput) playitInput.value = cfg.tmnf_playit_address || '';
-    if (weeklyUidInput && weeklyMapObj) weeklyUidInput.value = weeklyMapObj.uid || '';
-  }
-
-  // 3. File de Modération #preuves (avec Miniature & Lightbox directe)
-  const proofsList = document.getElementById('admin-proofs-list');
-  const pending = appState.admin?.pendingProofs || [];
-
-  if (pending.length === 0) {
-    proofsList.innerHTML = `<p style="color:var(--text-muted);font-size:0.88rem;">Aucune preuve en attente de validation.</p>`;
-  } else {
-    proofsList.innerHTML = `
-      <div class="grid-2">
-        ${pending
-          .map((p) => {
-            const isImg = p.proof_file && /\.(png|jpe?g|webp|gif)$/i.test(p.proof_file);
-            const fileUrl = p.proof_file ? `/uploads/proofs/${encodeURIComponent(p.proof_file)}` : '';
-            return `
-            <div style="background:var(--bg-elevated);padding:1rem;border-radius:var(--radius-md);border:1px solid var(--border-subtle);display:flex;flex-direction:column;justify-content:space-between;gap:0.75rem;">
-              <div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
-                  <strong>👤 ${escapeHtml(p.display_name)}</strong>
-                  <span class="badge badge-hard">${p.game_emoji} +${p.points} pts</span>
-                </div>
-                <div style="font-weight:600;font-size:0.92rem;">${escapeHtml(p.title)}</div>
-                <p style="font-size:0.8rem;color:var(--text-secondary);margin-top:0.2rem;">${escapeHtml(p.description)}</p>
-                ${
-                  p.proof_url
-                    ? `<div style="margin-top:0.5rem;font-size:0.82rem;"><a href="${escapeHtml(p.proof_url)}" target="_blank" rel="noopener" style="color:var(--accent-gold);">🔗 Ouvrir le lien de preuve externe</a></div>`
-                    : ''
-                }
-                ${
-                  isImg
-                    ? `<div style="margin-top:0.55rem;">
-                         <img
-                           src="${fileUrl}"
-                           alt="Preuve"
-                           data-lightbox-src="${fileUrl}"
-                           data-lightbox-cap="${escapeHtml(p.display_name)} — ${escapeHtml(p.title)}"
-                           style="max-height:150px;max-width:100%;border-radius:6px;border:1px solid var(--border-strong);cursor:zoom-in;display:block;"
-                           title="Cliquer pour agrandir en plein écran"
-                         />
-                       </div>`
-                    : p.proof_file
-                    ? `<div style="margin-top:0.5rem;"><a href="${fileUrl}" target="_blank" style="color:var(--accent-emerald);font-size:0.82rem;">🎬 Voir la vidéo / fichier envoyé (${escapeHtml(p.proof_file)})</a></div>`
-                    : ''
-                }
-                ${
-                  p.proof_note
-                    ? `<div style="margin-top:0.35rem;font-size:0.78rem;color:var(--text-muted);">💬 "${escapeHtml(p.proof_note)}"</div>`
-                    : ''
-                }
-              </div>
-              <div style="display:flex;gap:0.5rem;">
-                <button type="button" class="btn btn-emerald btn-sm admin-approve-btn" data-id="${p.id}">
-                  ✅ Valider (+${p.points} pts)
-                </button>
-                <button type="button" class="btn btn-danger btn-sm admin-reject-btn" data-id="${p.id}">
-                  ❌ Refuser
-                </button>
-              </div>
-            </div>
-          `;
-          })
-          .join('')}
-      </div>
-    `;
-
-    proofsList.querySelectorAll('[data-lightbox-src]').forEach((img) => {
-      img.addEventListener('click', () => openLightbox(img.dataset.lightboxSrc, img.dataset.lightboxCap));
-    });
-
-    proofsList.querySelectorAll('.admin-approve-btn').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        await fetch(`/api/admin/proofs/${btn.dataset.id}/review`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'approve' }),
-        });
-        showToast('✅ Preuve validée et points crédités dans points_ledger !');
-        await fetchState();
-      });
-    });
-
-    proofsList.querySelectorAll('.admin-reject-btn').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const reason = prompt('Motif du refus (le joueur pourra re-soumettre une preuve valide) :', 'Screenshot incomplet');
-        if (!reason) return;
-        await fetch(`/api/admin/proofs/${btn.dataset.id}/review`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'reject', rejectReason: reason }),
-        });
-        showToast('❌ Preuve refusée.');
-        await fetchState();
-      });
-    });
-  }
-
-  // 4. Tournois : Chapeaux, Check-in, Équipes & Classement Final
-  const selectEl = document.getElementById('admin-tournament-select');
-  const selectedTourneyId = selectEl.value || 'rl_rumble';
-  const tourney = (appState.tournaments || []).find((t) => t.id === selectedTourneyId);
-  const poolsTbody = document.getElementById('admin-pools-tbody');
-
-  if (tourney) {
-    poolsTbody.innerHTML = tourney.registrations
-      .map(
-        (r) => `
-        <tr>
-          <td><strong>${escapeHtml(r.display_name)}</strong></td>
-          <td>
-            <select class="select-field admin-pool-change" data-uid="${r.user_id}" style="padding:0.25rem 0.5rem;font-size:0.8rem;">
-              <option value="1" ${r.pool === 1 ? 'selected' : ''}>Chapeau 1 (Tryhard)</option>
-              <option value="2" ${r.pool === 2 ? 'selected' : ''}>Chapeau 2 (Intermédiaire)</option>
-              <option value="3" ${r.pool === 3 ? 'selected' : ''}>Chapeau 3 (Chill)</option>
-            </select>
-          </td>
-          <td>
-            <input type="checkbox" class="admin-checkin-toggle" data-uid="${r.user_id}" ${r.checked_in ? 'checked' : ''} />
-          </td>
-          <td class="mono" style="font-size:0.8rem;color:var(--accent-gold);">
-            ${r.team_name ? escapeHtml(r.team_name) : '—'}
-          </td>
-          <td>
-            <select class="select-field admin-placement-select" data-uid="${r.user_id}" style="padding:0.25rem 0.45rem;font-size:0.78rem;">
-              <option value="">—</option>
-              <option value="1" ${r.placement === 1 ? 'selected' : ''}>🥇 1er</option>
-              <option value="2" ${r.placement === 2 ? 'selected' : ''}>🥈 2e</option>
-              <option value="3" ${r.placement === 3 ? 'selected' : ''}>🥉 3e-4e</option>
-              <option value="5" ${r.placement === 5 ? 'selected' : ''}>🏅 5e-8e</option>
-              <option value="9" ${r.placement === 9 ? 'selected' : ''}>🎮 Participation</option>
-            </select>
-          </td>
-        </tr>
-      `
-      )
-      .join('');
-
-    poolsTbody.querySelectorAll('.admin-pool-change').forEach((sel) => {
-      sel.addEventListener('change', async () => {
-        await fetch(`/api/admin/tournaments/${selectedTourneyId}/player`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: sel.dataset.uid, pool: Number(sel.value) }),
-        });
-        await fetchState();
-      });
-    });
-
-    poolsTbody.querySelectorAll('.admin-checkin-toggle').forEach((chk) => {
-      chk.addEventListener('change', async () => {
-        await fetch(`/api/admin/tournaments/${selectedTourneyId}/player`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: chk.dataset.uid, checkedIn: chk.checked }),
-        });
-        await fetchState();
-      });
-    });
-  }
-
-  // 5. Fall Guys 5 Shows
-  const fgTourney = (appState.tournaments || []).find((t) => t.id === 'fall_guys');
-  const fgTbody = document.getElementById('admin-fg-tbody');
-  if (fgTourney) {
-    fgTbody.innerHTML = fgTourney.registrations
-      .map((r) => {
-        const shows = r.fg_shows || [0, 0, 0, 0, 0];
-        return `
-          <tr data-fg-uid="${r.user_id}">
-            <td><strong>${escapeHtml(r.display_name)}</strong></td>
-            ${[0, 1, 2, 3, 4]
-              .map(
-                (idx) => `
-                <td>
-                  <select class="select-field fg-show-input" data-idx="${idx}" style="padding:0.2rem;font-size:0.78rem;min-width:54px;">
-                    <option value="0" ${shows[idx] === 0 ? 'selected' : ''}>0</option>
-                    <option value="1" ${shows[idx] === 1 ? 'selected' : ''}>1 (Élim)</option>
-                    <option value="3" ${shows[idx] === 3 ? 'selected' : ''}>3 (Qualif)</option>
-                    <option value="6" ${shows[idx] === 6 ? 'selected' : ''}>6 (Finale)</option>
-                    <option value="10" ${shows[idx] === 10 ? 'selected' : ''}>10 (👑)</option>
-                  </select>
-                </td>
-              `
-              )
-              .join('')}
-            <td class="mono" style="font-weight:700;">${r.fg_total_score || 0}</td>
-            <td class="mono" style="color:var(--accent-gold);font-weight:700;">+${r.points_awarded || 0}</td>
-          </tr>
-        `;
-      })
-      .join('');
-  }
-
-  // 6. Liste des joueurs pour attribution manuelle de points
-  const manualUserSelect = document.getElementById('manual-pts-user');
-  const allUsers = appState.admin?.allUsers || [];
-  if (manualUserSelect && allUsers.length > 0) {
-    const currentVal = manualUserSelect.value;
-    manualUserSelect.innerHTML = allUsers
-      .map((u) => `<option value="${u.id}">${escapeHtml(u.display_name)} (@${escapeHtml(u.username)})</option>`)
-      .join('');
-    if (currentVal) manualUserSelect.value = currentVal;
-  }
-}
-
-function resetProofModal() {
-  pastedProofFile = null;
-  document.getElementById('proof-submit-form').reset();
-  const preview = document.getElementById('proof-paste-preview');
-  const zone = document.getElementById('proof-paste-zone');
-  const promptEl = document.getElementById('proof-paste-prompt');
-  preview.style.display = 'none';
-  preview.src = '';
-  zone.classList.remove('has-file');
-  promptEl.innerHTML = `
-    <strong>Appuie sur Ctrl+V pour coller une capture d'écran</strong>
-    <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 0.2rem">
-      ou clique ici pour sélectionner une image (≤ 10 Mo) / vidéo courte (≤ 20 Mo)
-    </div>
-  `;
-}
-
-function displaySelectedProofFile(file) {
-  pastedProofFile = file;
-  const preview = document.getElementById('proof-paste-preview');
-  const zone = document.getElementById('proof-paste-zone');
-  const promptEl = document.getElementById('proof-paste-prompt');
-
-  zone.classList.add('has-file');
-  promptEl.innerHTML = `✅ Fichier prêt : <strong>${escapeHtml(file.name)}</strong> (${Math.round(file.size / 1024)} Ko)`;
-
-  if (file.type.startsWith('image/')) {
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      preview.src = ev.target.result;
-      preview.style.display = 'inline-block';
-    };
-    reader.readAsDataURL(file);
-  } else {
-    preview.style.display = 'none';
-  }
+  $('tombola-spin-btn').disabled = false;
 }
 
 // ============================================================================
-// INITIALISATION & ÉVÉNEMENTS DOM
+// TEMPS RÉEL
 // ============================================================================
-
-window.addEventListener('DOMContentLoaded', async () => {
-  updateResetCountdown();
-  setInterval(updateResetCountdown, 1000);
-
-  document.querySelectorAll('.nav-tab').forEach((btn) => {
-    btn.addEventListener('click', () => switchView(btn.dataset.view));
-  });
-
-  document.getElementById('cta-open-quests').addEventListener('click', () => switchView('defis'));
-  document.getElementById('cta-open-tm').addEventListener('click', () => switchView('trackmania'));
-
-  // Recherche & Filtres rapides du Classement Général
-  document.getElementById('lb-search-input')?.addEventListener('input', (e) => {
-    leaderboardSearch = e.target.value || '';
-    renderLeaderboardAndFeed();
-  });
-
-  document.querySelectorAll('.lb-filter-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      leaderboardFilter = btn.dataset.filter || 'all';
-      document.querySelectorAll('.lb-filter-btn').forEach((b) => {
-        b.className = `btn ${b.dataset.filter === leaderboardFilter ? 'btn-primary' : 'btn-secondary'} btn-sm lb-filter-btn`;
-      });
-      renderLeaderboardAndFeed();
-    });
-  });
-
-  document.getElementById('toggle-games-drawer-btn').addEventListener('click', () => {
-    gamesDrawerOpen = !gamesDrawerOpen;
-    renderQuestsAndGames();
-  });
-
-  document.getElementById('copy-playit-btn').addEventListener('click', () => {
-    const addr = document.getElementById('tmnf-playit-addr').textContent.trim();
-    navigator.clipboard?.writeText(addr);
-    showToast(`📋 Adresse copiée : ${addr}`);
-  });
-
-  const copyReplaysPath = () => {
-    const pathStr = '%USERPROFILE%\\Documents\\TrackMania\\Tracks\\Replays\\Replays';
-    navigator.clipboard?.writeText(pathStr);
-    showToast(`📂 Chemin Windows copié ! Colle-le (Ctrl+V) dans la fenêtre d'upload.`);
+function connectSse() {
+  const es = new EventSource('/api/events');
+  es.onopen = () => {
+    sseConnected = true;
+    if (appState) renderPhaseChip();
   };
-  document.getElementById('copy-replays-path-btn')?.addEventListener('click', copyReplaysPath);
-  document.getElementById('guide-copy-path-btn')?.addEventListener('click', copyReplaysPath);
-  document.getElementById('open-guide-from-tm-btn')?.addEventListener('click', () => switchView('guide'));
-
-  // Sauvegarde des jeux
-  document.getElementById('save-games-btn').addEventListener('click', async () => {
-    if (!appState?.user) {
-      document.getElementById('login-modal').classList.add('open');
-      return;
+  es.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload.type === 'connected') return;
+      if (payload.message) toast({ title: plain(payload.message), type: payload.type === 'points_updated' ? 'points' : 'info' });
+      scheduleFetch();
+    } catch {
+      /* battement de cœur */
     }
-    const res = await fetch('/api/profile/games', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gameIds: Array.from(selectedGameIds) }),
+  };
+  es.onerror = () => {
+    sseConnected = false;
+    if (appState) renderPhaseChip();
+  };
+}
+
+// ============================================================================
+// INITIALISATION
+// ============================================================================
+function isTyping(e) {
+  const t = e.target;
+  return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+}
+
+function bindStatic() {
+  hydrateIcons();
+
+  // Délégations globales
+  document.addEventListener('click', (e) => {
+    const playerBtn = e.target.closest('[data-player-btn]');
+    if (playerBtn) openLedger(playerBtn.dataset.playerBtn);
+    const menu = $('usermenu-list');
+    if (menu && !menu.hidden && !e.target.closest('.usermenu')) {
+      menu.hidden = true;
+      $('usermenu-btn')?.setAttribute('aria-expanded', 'false');
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    const menu = $('usermenu-list');
+    if (e.key === 'Escape' && menu && !menu.hidden) {
+      menu.hidden = true;
+      $('usermenu-btn')?.focus();
+    }
+  });
+
+  // Fermeture des dialogues
+  document.querySelectorAll('dialog').forEach((d) => {
+    d.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => d.close()));
+    d.addEventListener('click', (e) => {
+      if (e.target === d) d.close();
     });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast(`❌ ${data.error}`);
-      return;
-    }
-    gamesDrawerOpen = false;
-    showToast('✅ Jeux sauvegardés et 3 défis du jour générés !');
-    await fetchState();
   });
 
-  // Modale Preuve + Support Ctrl+V (Clipboard Paste)
-  const closeProofModal = () => document.getElementById('proof-modal').classList.remove('open');
-  document.getElementById('proof-modal-close').addEventListener('click', closeProofModal);
-  document.getElementById('proof-modal-cancel').addEventListener('click', closeProofModal);
-
-  const proofFileInput = document.getElementById('proof-file-input');
-  document.getElementById('proof-paste-zone').addEventListener('click', () => proofFileInput.click());
-  proofFileInput.addEventListener('change', () => {
-    if (proofFileInput.files?.[0]) {
-      displaySelectedProofFile(proofFileInput.files[0]);
-    }
+  // Classement
+  $('lb-filters').querySelectorAll('[data-filter]').forEach((b) =>
+    b.addEventListener('click', () => {
+      leaderboardFilter = b.dataset.filter;
+      $('lb-filters').querySelectorAll('[data-filter]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      renderLeaderboard();
+    })
+  );
+  $('lb-search').addEventListener('input', (e) => {
+    leaderboardSearch = e.target.value || '';
+    renderLeaderboard();
   });
 
+  // Trackmania
+  document.querySelectorAll('[data-copy-replays]').forEach((b) => b.addEventListener('click', () => copyText(REPLAYS_PATH, 'Chemin copié · colle-le dans la fenêtre d’ouverture')));
+  const drop = $('gbx-drop');
+  $('gbx-input').addEventListener('change', (e) => uploadReplays(e.target.files));
+  drop.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    drop.classList.add('is-over');
+  });
+  drop.addEventListener('dragleave', () => drop.classList.remove('is-over'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('is-over');
+    uploadReplays(e.dataTransfer?.files);
+  });
+  $('tmnf-login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!appState?.user) return openLogin();
+    const tmnfLogin = $('tmnf-login-input').value.trim();
+    if (!tmnfLogin) return $('tmnf-login-input').focus();
+    const { ok, data } = await api('/api/profile/tmnf-login', { json: { tmnfLogin } });
+    if (!ok) return toastError(data);
+    toast({ title: 'Login Trackmania lié', text: `${tmnfLogin} : tes chronos du serveur remonteront tout seuls.`, type: 'success' });
+    fetchState();
+  });
+
+  // Preuve
+  const proofFile = $('proof-file');
+  proofFile.addEventListener('change', () => proofFile.files?.[0] && setProofFile(proofFile.files[0]));
+  const pd = $('proof-drop');
+  pd.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    pd.classList.add('is-over');
+  });
+  pd.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (e.dataTransfer?.files?.[0]) setProofFile(e.dataTransfer.files[0]);
+  });
   window.addEventListener('paste', (e) => {
-    const modalOpen = document.getElementById('proof-modal').classList.contains('open');
-    if (!modalOpen) return;
-    const items = e.clipboardData?.items || [];
-    for (const item of items) {
+    if (!$('proof-dialog').open) return;
+    for (const item of e.clipboardData?.items || []) {
       if (item.type.startsWith('image/')) {
         const blob = item.getAsFile();
         if (blob) {
-          const namedFile = new File([blob], `clipboard_${Date.now()}.png`, { type: blob.type });
-          displaySelectedProofFile(namedFile);
-          showToast('📸 Capture d’écran collée depuis le presse-papiers !');
+          setProofFile(new File([blob], `capture_${Date.now()}.png`, { type: blob.type }));
           e.preventDefault();
           break;
         }
       }
     }
   });
-
-  document.getElementById('proof-submit-form').addEventListener('submit', async (e) => {
+  $('proof-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const assignmentId = document.getElementById('proof-assignment-id').value;
-    const formData = new FormData();
-    if (pastedProofFile) {
-      formData.append('proofFile', pastedProofFile);
-    } else if (proofFileInput.files?.[0]) {
-      formData.append('proofFile', proofFileInput.files[0]);
-    }
-    formData.append('proofUrl', document.getElementById('proof-url-input').value);
-    formData.append('proofNote', document.getElementById('proof-note-input').value);
-
-    const res = await fetch(`/api/quests/${assignmentId}/submit`, {
-      method: 'POST',
-      body: formData,
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast(`❌ ${data.error}`);
+    const url = $('proof-url').value.trim();
+    if (!pastedProofFile && !url) {
+      $('proof-error').textContent = 'Ajoute une capture, un fichier ou un lien.';
       return;
     }
-    closeProofModal();
-    showToast('🚀 Preuve envoyée dans #preuves !');
-    await fetchState();
-  });
-
-  // Modales Détail Points Joueur, Classement Piste & Lightbox
-  document.getElementById('player-ledger-close').addEventListener('click', () => {
-    document.getElementById('player-ledger-modal').classList.remove('open');
-  });
-  document.getElementById('track-lb-close')?.addEventListener('click', () => {
-    document.getElementById('track-leaderboard-modal').classList.remove('open');
-  });
-  document.getElementById('lightbox-close')?.addEventListener('click', () => {
-    document.getElementById('lightbox-modal').classList.remove('open');
-  });
-
-  // Modale Login
-  document.getElementById('login-modal-close').addEventListener('click', () => {
-    document.getElementById('login-modal').classList.remove('open');
-  });
-
-  document.getElementById('dev-login-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const username = document.getElementById('dev-login-username').value;
-    const isAdmin = document.getElementById('dev-login-admin').checked;
-    const res = await fetch('/api/auth/dev-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, isAdmin }),
-    });
-    if (res.ok) {
-      document.getElementById('login-modal').classList.remove('open');
-      showToast(`👋 Bienvenue ${username} !`);
-      await fetchState();
-    }
-  });
-
-  // Upload Multi-Fichiers .Replay.gbx (Sélection multiple + Drag & Drop)
-  const gbxInput = document.getElementById('gbx-file-input');
-  const gbxLabel = document.getElementById('gbx-file-label');
-  const gbxDropzone = document.getElementById('gbx-dropzone');
-
-  const updateGbxFilesLabel = (filesList) => {
-    selectedGbxFiles = Array.from(filesList || []);
-    if (selectedGbxFiles.length === 1) {
-      gbxLabel.textContent = `1 fichier prêt : ${selectedGbxFiles[0].name}`;
-    } else if (selectedGbxFiles.length > 1) {
-      gbxLabel.textContent = `📦 ${selectedGbxFiles.length} fichiers .Replay.gbx prêts pour l'analyse groupée !`;
-    }
-  };
-
-  gbxInput.addEventListener('change', () => {
-    if (gbxInput.files?.length) {
-      updateGbxFilesLabel(gbxInput.files);
-    }
-  });
-
-  if (gbxDropzone) {
-    gbxDropzone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      gbxDropzone.style.borderColor = 'var(--accent-gold)';
-    });
-    gbxDropzone.addEventListener('dragleave', () => {
-      gbxDropzone.style.borderColor = '';
-    });
-    gbxDropzone.addEventListener('drop', (e) => {
-      e.preventDefault();
-      gbxDropzone.style.borderColor = '';
-      if (e.dataTransfer?.files?.length) {
-        updateGbxFilesLabel(e.dataTransfer.files);
-      }
-    });
-  }
-
-  document.getElementById('gbx-upload-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!appState?.user) {
-      document.getElementById('login-modal').classList.add('open');
-      return;
-    }
-    const filesToSend = selectedGbxFiles.length > 0 ? selectedGbxFiles : Array.from(gbxInput.files || []);
-    if (filesToSend.length === 0) {
-      showToast('❌ Sélectionne ou glisse au moins un fichier .Replay.gbx.');
-      return;
-    }
-
     const fd = new FormData();
-    filesToSend.forEach((f) => fd.append('replays', f));
-
-    const res = await fetch('/api/tmnf/submit-replays-batch', {
-      method: 'POST',
-      body: fd,
-    });
-    const data = await res.json();
-    const banner = document.getElementById('gbx-result-banner');
-
-    if (!res.ok) {
-      banner.innerHTML = `<div style="padding:0.75rem;border-radius:6px;background:var(--accent-danger-soft);color:hsl(0,90%,72%);font-size:0.86rem;">❌ ${escapeHtml(data.error)}</div>`;
+    if (pastedProofFile) fd.append('proofFile', pastedProofFile);
+    fd.append('proofUrl', url);
+    fd.append('proofNote', $('proof-note').value.trim());
+    const btn = $('proof-submit');
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.innerHTML = '<span class="hgw-spinner"></span>Envoi…';
+    const { ok, data } = await api(`/api/quests/${$('proof-assignment-id').value}/submit`, { method: 'POST', body: fd });
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    btn.textContent = 'Envoyer';
+    if (!ok) {
+      $('proof-error').textContent = plain(data.error) || 'Envoi impossible.';
       return;
     }
-
-    const linesHtml = (data.results || [])
-      .map((r) =>
-        r.ok
-          ? `<div style="margin-top:0.25rem;">✅ <strong>${escapeHtml(r.mapCode)} (${escapeHtml(r.mapName)})</strong> : <strong class="mono">${r.formattedTime}</strong> (${r.medal.toUpperCase()} • ${r.deltaPoints > 0 ? `+${r.deltaPoints} pts` : 'PB / enregistré'})</div>`
-          : `<div style="margin-top:0.25rem;color:hsl(0,90%,72%);">❌ <strong>${escapeHtml(r.fileName)}</strong> : ${escapeHtml(r.error)}</div>`
-      )
-      .join('');
-
-    banner.innerHTML = `
-      <div style="padding:0.85rem;border-radius:6px;background:var(--accent-emerald-soft);color:hsl(156,78%,62%);font-size:0.86rem;">
-        <strong>🏁 Bilan du lot : ${data.validCount} replay(s) validé(s)${data.totalDeltaPoints > 0 ? ` • +${data.totalDeltaPoints} pts crédités !` : ''}</strong>
-        ${linesHtml}
-      </div>
-    `;
-    selectedGbxFiles = [];
-    gbxInput.value = '';
-    showToast(`🏁 ${data.validCount} replay(s) analysé(s)${data.totalDeltaPoints > 0 ? ` (+${data.totalDeltaPoints} pts)` : ''} !`);
-    await fetchState();
+    $('proof-dialog').close();
+    toast({ title: 'Preuve envoyée', text: 'Un orga va la vérifier. Tu seras notifié ici.', type: 'success' });
+    fetchState();
   });
 
-  // Mode Show Stream Plein Écran (Chapeaux & Roue Tombola)
-  document.getElementById('open-stream-show-btn').addEventListener('click', openStreamRevealStage);
-  document.getElementById('stream-next-step-btn').addEventListener('click', revealNextStreamSlot);
-  document.getElementById('stream-reveal-all-btn').addEventListener('click', () => {
-    while (streamRevealIndex < streamRevealQueue.length) {
-      revealNextStreamSlot();
+  // Connexion de test
+  $('dev-login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = $('dev-login-username').value.trim();
+    if (!username) return;
+    const { ok, data } = await api('/api/auth/dev-login', { json: { username, isAdmin: $('dev-login-admin').checked } });
+    if (!ok) return toastError(data);
+    $('dev-login-dialog').close();
+    toast({ title: `Bienvenue ${username}`, type: 'success' });
+    fetchState();
+  });
+
+  // Admin : refus
+  $('reject-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const reason = $('reject-text').value.trim();
+    if (!reason) {
+      $('reject-text').closest('.hgw-field').classList.add('hgw-field--error');
+      return $('reject-text').focus();
     }
+    $('reject-text').closest('.hgw-field').classList.remove('hgw-field--error');
+    $('reject-dialog').close();
+    if (rejectTarget) queueDecision(rejectTarget, { action: 'reject', rejectReason: reason });
   });
-  document.getElementById('stream-reset-reveal-btn').addEventListener('click', openStreamRevealStage);
-  document.getElementById('stream-close-btn').addEventListener('click', () => {
-    document.getElementById('stream-stage-overlay').classList.remove('open');
-  });
-
-  document.getElementById('open-tombola-stage-btn')?.addEventListener('click', openTombolaStage);
-  document.getElementById('tombola-spin-btn')?.addEventListener('click', spinTombolaWheel);
-  document.getElementById('tombola-stage-close-btn')?.addEventListener('click', () => {
-    document.getElementById('tombola-stage-overlay').classList.remove('open');
-  });
-
-  window.addEventListener('keydown', (e) => {
-    const stageOpen = document.getElementById('stream-stage-overlay').classList.contains('open');
-    if (stageOpen && e.code === 'Space') {
+  $('reject-dialog').addEventListener('keydown', (e) => {
+    if (e.target === $('reject-text')) return;
+    const n = Number(e.key);
+    if (n >= 1 && n <= REJECT_REASONS.length) {
       e.preventDefault();
-      revealNextStreamSlot();
+      pickReason(n - 1);
     }
   });
 
-  // Événements Admin
-  document.getElementById('admin-settings-form')?.addEventListener('submit', async (e) => {
+  // Admin : réglages
+  $('settings-form').addEventListener('input', () => (settingsDirty = true));
+  $('cfg-manual').addEventListener('change', (e) => ($('cfg-manual-field').hidden = !e.target.checked));
+  $('settings-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (!validateSettings()) return;
     const payload = {
-      status_mode: document.getElementById('cfg-status-mode').value,
-      start_at: document.getElementById('cfg-start-at').value,
-      week2_start_at: document.getElementById('cfg-week2-start-at')?.value || '',
-      tmnf_cutoff_at: document.getElementById('cfg-tmnf-cutoff-at').value,
-      end_at: document.getElementById('cfg-end-at').value,
-      tmnf_playit_address: document.getElementById('cfg-playit-addr').value.trim(),
-      weekly_map_uid: document.getElementById('cfg-weekly-uid').value.trim(),
+      status_mode: $('cfg-manual').checked ? $('cfg-status-mode').value : 'auto',
+      start_at: $('cfg-start-at').value,
+      week2_start_at: $('cfg-week2-start-at').value,
+      tmnf_cutoff_at: $('cfg-tmnf-cutoff-at').value,
+      end_at: $('cfg-end-at').value,
+      tmnf_playit_address: $('cfg-playit-addr').value.trim(),
+      weekly_map_uid: $('cfg-weekly-uid').value.trim(),
     };
-    const res = await fetch('/api/admin/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      showToast('📅 Dates et phase de la HGW mises à jour en temps réel !');
-      await fetchState();
-    }
+    const { ok, data } = await api('/api/admin/settings', { json: payload });
+    if (!ok) return toastError(data);
+    settingsDirty = false;
+    toast({ title: 'Réglages enregistrés', text: payload.status_mode === 'auto' ? 'Phases automatiques selon les dates.' : 'Phase forcée : pense à repasser en automatique.', type: payload.status_mode === 'auto' ? 'success' : 'danger' });
+    fetchState();
   });
 
-  document.getElementById('admin-tournament-select').addEventListener('change', () => renderAdmin());
-
-  document.getElementById('admin-draw-teams-btn').addEventListener('click', async () => {
-    const tid = document.getElementById('admin-tournament-select').value;
-    const res = await fetch(`/api/admin/tournaments/${tid}/draw-teams`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ onlyCheckedIn: true, announceDiscord: false }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast(`❌ ${data.error}`);
-      return;
-    }
-    showToast(`🎲 ${data.teams.length} équipes équilibrées générées !`);
-    await fetchState();
+  // Admin : tournois
+  const draw = async (announceDiscord) => {
+    const { ok, data } = await api(`/api/admin/tournaments/${adminTourneyId}/draw-teams`, { json: { onlyCheckedIn: true, announceDiscord } });
+    if (!ok) return toastError(data);
+    toast({ title: `${data.teams.length} équipes tirées`, text: announceDiscord ? 'Annonce envoyée sur Discord.' : 'Ouvre la scène pour les révéler en stream.', type: 'success' });
+    fetchState();
+  };
+  $('draw-teams-btn').addEventListener('click', () => draw(false));
+  $('draw-discord-btn').addEventListener('click', () => draw(true));
+  $('save-placements-btn').addEventListener('click', async () => {
+    const placements = [...document.querySelectorAll('#admin-pools-tbody [data-place]')].filter((s) => s.value).map((s) => ({ userId: s.dataset.place, placement: Number(s.value) }));
+    if (!placements.length) return toast({ title: 'Aucune place renseignée', text: 'Choisis au moins une place finale.', type: 'danger' });
+    const { ok, data } = await api(`/api/admin/tournaments/${adminTourneyId}/placements`, { json: { placements } });
+    if (!ok) return toastError(data);
+    toast({ title: 'Résultats enregistrés', text: 'Les points live sont crédités.', type: 'success' });
+    fetchState();
+  });
+  $('save-fg-btn').addEventListener('click', async () => {
+    const scores = [...document.querySelectorAll('#admin-fg-tbody tr[data-fg]')].map((tr) => ({ userId: tr.dataset.fg, shows: [...tr.querySelectorAll('[data-show]')].map((s) => Number(s.value)) }));
+    if (!scores.length) return;
+    const { ok, data } = await api('/api/admin/fall-guys/scores', { json: { scores } });
+    if (!ok) return toastError(data);
+    toast({ title: 'Fall Guys calculé', text: 'Les points HGW sont attribués.', type: 'success' });
+    fetchState();
   });
 
-  document.getElementById('admin-draw-discord-btn').addEventListener('click', async () => {
-    const tid = document.getElementById('admin-tournament-select').value;
-    const res = await fetch(`/api/admin/tournaments/${tid}/draw-teams`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ onlyCheckedIn: true, announceDiscord: true }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast(`❌ ${data.error}`);
-      return;
-    }
-    showToast(`📢 Équipes tirées et envoyées au Bot Discord !`);
-    await fetchState();
-  });
-
-  document.getElementById('admin-save-placements-btn')?.addEventListener('click', async () => {
-    const tid = document.getElementById('admin-tournament-select').value;
-    const selects = document.querySelectorAll('#admin-pools-tbody .admin-placement-select');
-    const placements = [];
-    selects.forEach((sel) => {
-      if (sel.value) {
-        placements.push({ userId: sel.dataset.uid, placement: Number(sel.value) });
-      }
-    });
-    if (placements.length === 0) {
-      showToast('⚠️ Sélectionne au moins une place finale dans le tableau avant de valider.');
-      return;
-    }
-    const res = await fetch(`/api/admin/tournaments/${tid}/placements`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ placements }),
-    });
-    if (res.ok) {
-      showToast('🏆 Classement du tournoi enregistré et points Live crédités !');
-      await fetchState();
-    }
-  });
-
-  document.getElementById('admin-save-fg-btn').addEventListener('click', async () => {
-    const rows = document.querySelectorAll('#admin-fg-tbody tr[data-fg-uid]');
-    const scores = Array.from(rows).map((tr) => {
-      const userId = tr.dataset.fgUid;
-      const shows = Array.from(tr.querySelectorAll('.fg-show-input')).map((s) => Number(s.value));
-      return { userId, shows };
-    });
-
-    const res = await fetch('/api/admin/fall-guys/scores', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scores }),
-    });
-    if (res.ok) {
-      showToast('🫘 Cumul des 5 parties Fall Guys calculé et points HGW attribués !');
-      await fetchState();
-    }
-  });
-
-  document.getElementById('admin-manual-points-form')?.addEventListener('submit', async (e) => {
+  // Admin : points
+  ['mp-user', 'mp-amount'].forEach((id) => $(id).addEventListener('input', updateManualPreview));
+  $('manual-points-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const catEl = document.getElementById('manual-pts-cat') || document.getElementById('manual-pts-category');
-    const payload = {
-      userId: document.getElementById('manual-pts-user').value,
-      category: catEl ? catEl.value : 'async',
-      points: Number(document.getElementById('manual-pts-amount').value),
-      label: document.getElementById('manual-pts-label').value.trim(),
-    };
-    const res = await fetch('/api/admin/manual-points', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (res.ok) {
-      document.getElementById('manual-pts-amount').value = '25';
-      document.getElementById('manual-pts-label').value = '';
-      showToast('🎁 Points bonus/ajustement crédités en direct !');
-      await fetchState();
-    }
+    const label = $('mp-label').value.trim();
+    const points = Math.round(Number($('mp-amount').value));
+    const field = $('mp-label').closest('.hgw-field');
+    field.classList.toggle('hgw-field--error', label.length < 3);
+    if (!points) return $('mp-amount').focus();
+    if (label.length < 3) return $('mp-label').focus();
+    const { ok, data } = await api('/api/admin/manual-points', { json: { userId: $('mp-user').value, category: $('mp-cat').value, points, label } });
+    if (!ok) return toastError(data);
+    $('mp-label').value = '';
+    toast({ title: `${signed(points)} pts appliqués`, text: label, type: 'success' });
+    fetchState();
   });
 
-  document.getElementById('admin-draw-tombola-btn')?.addEventListener('click', async () => {
-    const res = await fetch('/api/admin/tombola/draw', { method: 'POST' });
-    const data = await res.json();
-    const box = document.getElementById('admin-tombola-winner-box');
-    if (!res.ok) {
-      showToast(`❌ ${data.error}`);
-      return;
-    }
-    if (box) {
-      box.style.display = 'block';
-      box.innerHTML = `
-        🎉 <strong>GAGNANT TIRÉ AU SORT (${data.eligibleCount} qualifiés ≥ 300 pts) :</strong>
-        <div style="font-family:var(--font-display);font-size:1.35rem;color:var(--accent-gold);margin-top:0.2rem;">
-          🎟️ ${escapeHtml(data.winner.display_name)} (${data.winner.total_points} pts)
-        </div>
-      `;
-    }
-    showToast(`🎟️ Gagnant Tombola : ${data.winner.display_name} !`);
-  });
-
-  document.getElementById('admin-seed-demo-btn').addEventListener('click', async () => {
-    const res = await fetch('/api/admin/seed-demo', { method: 'POST' });
-    const data = await res.json();
-    if (res.ok) {
-      showToast(`✨ ${data.message}`);
-      await fetchState();
-    }
-  });
-
-  document.getElementById('admin-cron-btn').addEventListener('click', async () => {
-    const res = await fetch('/api/admin/cron/trigger', { method: 'POST' });
-    const data = await res.json();
-    if (res.ok) {
-      showToast(`⏰ Reset simulé : ${data.usersProcessed} joueurs traités !`);
-      await fetchState();
-    }
-  });
-
-  // Formulaire de liaison du login Trackmania (pour la remontée auto depuis le serveur dédié)
-  document.getElementById('tmnf-login-form').addEventListener('submit', async (e) => {
+  // Admin : maintenance
+  $('cron-confirm').addEventListener('input', (e) => ($('cron-btn').disabled = e.target.value.trim().toUpperCase() !== 'RELANCER'));
+  $('cron-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!appState?.user) {
-      document.getElementById('login-modal').classList.add('open');
+    if ($('cron-btn').disabled) return;
+    const { ok, data } = await api('/api/admin/cron/trigger', { method: 'POST' });
+    if (!ok) return toastError(data);
+    $('cron-confirm').value = '';
+    $('cron-btn').disabled = true;
+    toast({ title: 'Tirage relancé', text: `${data.usersProcessed} joueurs traités.`, type: 'success' });
+    fetchState();
+  });
+  $('seed-demo-btn').addEventListener('click', async () => {
+    const { ok, data } = await api('/api/admin/seed-demo', { method: 'POST' });
+    if (!ok) return toastError(data);
+    toast({ title: plain(data.message) || 'Joueurs fictifs ajoutés', type: 'success' });
+    fetchState();
+  });
+  $('sim-finish-btn').addEventListener('click', async () => {
+    const weekly = (appState?.tmnfMaps || []).find((m) => m.is_weekly);
+    if (!weekly) return;
+    const best = appState?.weeklyTmnfLeaderboard?.[0]?.best_time_ms || 42500;
+    const { ok, data } = await api('/api/tmnf/webhook', {
+      json: { playerLogin: appState.user.tmnf_login || appState.user.username, playerNickname: appState.user.display_name, mapUid: weekly.uid, timeMs: Math.max(38500, best - Math.floor(Math.random() * 280) - 40) },
+    });
+    if (!ok) return toastError(data);
+    toast({ title: `Chrono simulé : ${data.formattedTime}`, type: 'success' });
+  });
+
+  // Scènes
+  $('open-stage-btn').addEventListener('click', openTeamsStage);
+  $('stage-next-btn').addEventListener('click', revealNext);
+  $('stage-all-btn').addEventListener('click', () => {
+    while (stageIndex < stageQueue.length) revealNext();
+  });
+  $('stage-reset-btn').addEventListener('click', openTeamsStage);
+  $('stage-close-btn').addEventListener('click', () => $('teams-stage').classList.remove('is-open'));
+  $('open-tombola-btn').addEventListener('click', openTombolaStage);
+  $('tombola-spin-btn').addEventListener('click', spinTombola);
+  $('tombola-close-btn').addEventListener('click', () => $('tombola-stage').classList.remove('is-open'));
+
+  // Clavier global
+  window.addEventListener('keydown', (e) => {
+    const teams = $('teams-stage').classList.contains('is-open');
+    const tombola = $('tombola-stage').classList.contains('is-open');
+    if (teams || tombola) {
+      if (e.key === 'Escape') {
+        $('teams-stage').classList.remove('is-open');
+        $('tombola-stage').classList.remove('is-open');
+      }
+      if (e.code === 'Space' && !isTyping(e)) {
+        e.preventDefault();
+        teams ? revealNext() : spinTombola();
+      }
       return;
     }
-    const tmnfLogin = document.getElementById('tmnf-login-input').value.trim();
-    const res = await fetch('/api/profile/tmnf-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tmnfLogin }),
-    });
-    if (res.ok) {
-      showToast(`🔗 Login Trackmania lié : "${tmnfLogin}" ! Tes temps sur le serveur dédié remonteront automatiquement.`);
-      await fetchState();
-    }
-  });
-
-  // Simulation d'un passage de ligne d'arrivée en direct sur le serveur dédié (Webhook XML-RPC)
-  document.getElementById('sim-live-finish-btn').addEventListener('click', async () => {
-    const weeklyMap = (appState?.tmnfMaps || []).find((m) => m.is_weekly);
-    if (!weeklyMap) return;
-    const currentBest = appState?.weeklyTmnfLeaderboard?.[0]?.best_time_ms || 42500;
-    const newRecordMs = Math.max(38500, currentBest - Math.floor(Math.random() * 280) - 40);
-    const login = appState?.user?.tmnf_login || appState?.user?.username || 'hextaz';
-
-    const res = await fetch('/api/tmnf/webhook', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        playerLogin: login,
-        playerNickname: appState?.user?.display_name || 'Hextaz',
-        mapUid: weeklyMap.uid,
-        timeMs: newRecordMs,
-      }),
-    });
-    const data = await res.json();
-    if (res.ok) {
-      showToast(`🏁 [Webhook XML-RPC] Nouveau record serveur en direct : ${data.formattedTime} !`);
-    }
-  });
-
-  // Connexion Temps Réel Server-Sent Events (SSE)
-  function connectRealtimeSse() {
-    const dot = document.getElementById('sse-status-dot');
-    const es = new EventSource('/api/events');
-
-    es.onopen = () => {
-      if (dot) {
-        dot.style.color = 'var(--accent-emerald)';
-        dot.textContent = '● Live';
-      }
-    };
-
-    es.onmessage = async (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === 'connected') return;
-        if (payload.message) {
-          showToast(payload.message);
+    if (document.querySelector('dialog[open]') || isTyping(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (route.view === 'admin' && route.pane === 'moderation' && visibleProofs().length) {
+      const k = e.key.toLowerCase();
+      if (k === 'v') decide('approve');
+      else if (k === 'r') {
+        e.preventDefault();
+        decide('reject');
+      } else if (e.key === 'ArrowRight') decide('skip');
+      else if (e.code === 'Space') {
+        const zoom = $('review-zoom');
+        if (zoom) {
+          e.preventDefault();
+          zoom.click();
         }
-        await fetchState();
-      } catch {
-        // ignore heartbeat parse
       }
-    };
+    }
+  });
+}
 
-    es.onerror = () => {
-      if (dot) {
-        dot.style.color = 'var(--accent-gold)';
-        dot.textContent = '○ Reconnexion...';
-      }
-    };
-  }
-
+window.addEventListener('DOMContentLoaded', async () => {
+  if (LEGACY_HASH[location.hash]) history.replaceState({}, '', LEGACY_HASH[location.hash]);
+  bindStatic();
+  applyRoute(resolveRoute(location.pathname));
+  setInterval(() => appState && renderPhaseChip(), 30000);
+  const params = new URLSearchParams(location.search);
+  if (params.get('error')) toast({ title: 'La connexion Discord a échoué', text: 'Réessaie, ou préviens un orga si ça continue.', type: 'danger' });
   await fetchState();
-  connectRealtimeSse();
+  connectSse();
 });

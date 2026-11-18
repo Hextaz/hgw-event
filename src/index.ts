@@ -44,6 +44,24 @@ const HOST = process.env.HOST || '127.0.0.1';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'hgw-dev-secret-change-in-production-2026';
 const COOKIE_NAME = 'hgw_session';
 
+// Mode démo (connexion de test, joueurs fictifs, replays d'exemple).
+// Fermé par défaut : en production il faut ALLOW_DEV_LOGIN=true explicitement.
+// En local (NODE_ENV ≠ production) il reste actif tant que Discord OAuth n'est pas configuré.
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const DEV_MODE =
+  process.env.ALLOW_DEV_LOGIN === 'true' || (!IS_PRODUCTION && !process.env.DISCORD_CLIENT_ID?.trim());
+if (IS_PRODUCTION && SESSION_SECRET.startsWith('hgw-dev-secret')) {
+  console.warn('⚠️  SESSION_SECRET par défaut utilisé en production : définissez-en un dans .env.');
+}
+
+function requireDevMode(_req: Request, res: Response, next: NextFunction): void {
+  if (!DEV_MODE) {
+    res.status(403).json({ error: 'Fonction disponible uniquement en mode démo.' });
+    return;
+  }
+  next();
+}
+
 // Hub Temps Réel SSE (Server-Sent Events)
 const sseClients = new Set<Response>();
 function broadcastRealtimeEvent(type: string, message?: string, payload?: any): void {
@@ -301,17 +319,15 @@ app.get('/api/auth/discord/callback', async (req, res) => {
   }
 });
 
-// Connexion rapide en mode Démo / Dev (quand DISCORD_CLIENT_ID n'est pas configuré ou ALLOW_DEV_LOGIN=true)
+// Connexion rapide en mode démo (voir DEV_MODE)
 app.post('/api/auth/dev-login', (req, res) => {
-  const allowDev =
-    process.env.ALLOW_DEV_LOGIN === 'true' || !process.env.DISCORD_CLIENT_ID?.trim();
-  if (!allowDev) {
+  if (!DEV_MODE) {
     res.status(403).json({ error: 'Le mode Dev Login est désactivé en production.' });
     return;
   }
 
   const rawName = String(req.body.username || 'Hextaz').trim().slice(0, 32) || 'Hextaz';
-  const asAdmin = req.body.isAdmin !== undefined ? Boolean(req.body.isAdmin) : true;
+  const asAdmin = req.body.isAdmin === true;
   const userId = String(req.body.userId || `user_${rawName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`);
 
   db.prepare(
@@ -514,7 +530,8 @@ app.get('/api/state', (req: AuthedRequest, res) => {
     eventSettings,
     maxWeeklyQuestsPerGame: MAX_WEEKLY_QUESTS_PER_GAME,
     oauthConfigured: Boolean(process.env.DISCORD_CLIENT_ID?.trim()),
-    allowDevLogin: process.env.ALLOW_DEV_LOGIN === 'true' || !process.env.DISCORD_CLIENT_ID?.trim(),
+    allowDevLogin: DEV_MODE,
+    devMode: DEV_MODE,
     botStatus: bot.getStatus(),
     tmnfServer: {
       login: eventSettings.tmnf_server_login,
@@ -857,8 +874,10 @@ app.post('/api/tmnf/webhook', (req: AuthedRequest, res) => {
   const headerSecret = String(req.headers['x-tmnf-secret'] || '');
   const isAdminSession = req.user?.is_admin === 1;
 
-  if (configuredSecret && headerSecret !== configuredSecret && !isAdminSession) {
-    res.status(401).json({ error: 'Signature X-TMNF-Secret invalide.' });
+  // Fermé par défaut : sans TMNF_WEBHOOK_SECRET configuré, seule une session admin peut publier un chrono.
+  const secretOk = Boolean(configuredSecret) && headerSecret === configuredSecret;
+  if (!secretOk && !isAdminSession) {
+    res.status(401).json({ error: 'Signature X-TMNF-Secret invalide ou absente.' });
     return;
   }
 
@@ -885,7 +904,7 @@ app.post('/api/tmnf/webhook', (req: AuthedRequest, res) => {
 });
 
 // Permet de télécharger un fichier .Replay.gbx d'exemple valide pour tester l'upload en 1 clic
-app.get('/api/tmnf/sample-replay/:mapId', requireAuth, (req: AuthedRequest, res) => {
+app.get('/api/tmnf/sample-replay/:mapId', requireDevMode, requireAuth, (req: AuthedRequest, res) => {
   const map = db.prepare(`SELECT * FROM tmnf_maps WHERE id = ?`).get(String(req.params.mapId)) as any;
   if (!map) {
     res.status(404).json({ error: 'Map introuvable.' });
@@ -951,6 +970,10 @@ app.post('/api/admin/proofs/:id/review', requireAdmin, (req: AuthedRequest, res)
     const assignmentId = Number.parseInt(String(req.params.id), 10);
     const action = req.body.action === 'reject' ? 'reject' : 'approve';
     const rejectReason = typeof req.body.rejectReason === 'string' ? req.body.rejectReason.trim() : undefined;
+    if (action === 'reject' && !rejectReason) {
+      res.status(400).json({ error: 'Un motif de refus est obligatoire : il est envoyé au joueur.' });
+      return;
+    }
 
     const updated = reviewDailyAssignment(db, {
       assignmentId,
@@ -1050,11 +1073,15 @@ app.post('/api/admin/settings', requireAdmin, (req: AuthedRequest, res) => {
 app.post('/api/admin/manual-points', requireAdmin, (req: AuthedRequest, res) => {
   try {
     const { userId, points, category, label } = req.body;
+    if (typeof label !== 'string' || label.trim().length < 3) {
+      res.status(400).json({ error: 'Un motif est obligatoire (3 caractères minimum) : il apparaît dans l’historique du joueur.' });
+      return;
+    }
     grantManualPoints(db, {
       userId: String(userId || ''),
       points: Number(points),
       category: category === 'live' ? 'live' : 'async',
-      label: String(label || 'Bonus Admin HGW'),
+      label: label.trim().slice(0, 120),
     });
     broadcastRealtimeEvent('points_updated', `🎁 Points bonus attribués (${points > 0 ? `+${points}` : points} pts) !`);
     res.json({ ok: true });
@@ -1119,7 +1146,7 @@ app.get('/api/admin/backup/json', requireAdmin, (_req: AuthedRequest, res) => {
 });
 
 // Seeder de démonstration en 1 clic pour peupler 12 joueurs, des médailles TMNF, des équipes RL Chapeaux et des preuves
-app.post('/api/admin/seed-demo', requireAdmin, (_req: AuthedRequest, res) => {
+app.post('/api/admin/seed-demo', requireDevMode, requireAdmin, (_req: AuthedRequest, res) => {
   const demoRoster = [
     { id: 'demo_hextaz', name: 'Hextaz', pool: 1, games: ['rocket_league', 'tmnf', 'valorant', 'cod'], tmMs: 41890 },
     { id: 'demo_kaydop', name: 'ZenithRL', pool: 1, games: ['rocket_league', 'brawlhalla', 'fall_guys', 'tmnf'], tmMs: 42120 },
