@@ -74,6 +74,7 @@ export function initDb(customDataDir?: string): DbContext {
       difficulty TEXT NOT NULL CHECK (difficulty IN ('easy', 'medium', 'hard')),
       points INTEGER NOT NULL,
       proof_hint TEXT NOT NULL DEFAULT 'Screenshot de fin de partie ou clip vidéo (15s)',
+      unlock_week INTEGER NOT NULL DEFAULT 1,
       active INTEGER NOT NULL DEFAULT 1,
       FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
     );
@@ -190,6 +191,12 @@ export function initDb(customDataDir?: string): DbContext {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // Migration douce si la base existait avant l'ajout de unlock_week (Format 2 Semaines)
+  const questCols = db.prepare(`PRAGMA table_info(quests)`).all() as { name: string }[];
+  if (!questCols.some((c) => c.name === 'unlock_week')) {
+    db.exec(`ALTER TABLE quests ADD COLUMN unlock_week INTEGER NOT NULL DEFAULT 1`);
+  }
 
   seedDatabase(db);
 

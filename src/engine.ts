@@ -2,9 +2,15 @@ import type Database from 'better-sqlite3';
 import { formatTmTime, parseReplayGbx } from './gbx.js';
 
 export const MIN_SELECTED_GAMES = 4;
-export const MAX_WEEKLY_QUESTS_PER_GAME = 5;
+export const MAX_WEEKLY_QUESTS_PER_GAME = 4; // 4/semaine (Semaine 1) + Reset auto Lundi Semaine 2 (4/semaine) = 8/jeu sur la quinzaine
 export const DAILY_QUESTS_COUNT = 3;
 export const TOMBOLA_POINTS_THRESHOLD = 300;
+
+export const REGULARITY_TIERS = [
+  { days: 4, points: 20, ref: 'regularity:tier_4', label: '🔥 Palier Régularité — 4 Jours Actifs (+20 pts)' },
+  { days: 8, points: 40, ref: 'regularity:tier_8', label: '🔥 Palier Régularité — 8 Jours Actifs (+40 pts)' },
+  { days: 12, points: 60, ref: 'regularity:tier_12', label: '👑 Palier Régularité — 12 Jours Actifs (+60 pts)' },
+] as const;
 
 export const MEDAL_POINTS: Record<string, number> = {
   author: 30,
@@ -74,9 +80,11 @@ export function saveUserSelectedGames(
 
   const tx = db.transaction(() => {
     db.prepare(`DELETE FROM user_games WHERE user_id = ?`).run(userId);
-    const ins = db.prepare(`INSERT INTO user_games (user_id, game_id) VALUES (?, ?)`);
+    const ins = db.prepare(`INSERT INTO user_games (user_id) SELECT ? WHERE 1=0`); // no-op warmup
+    void ins;
+    const insertUg = db.prepare(`INSERT INTO user_games (user_id, game_id) VALUES (?, ?)`);
     for (const gid of cleaned) {
-      ins.run(userId, gid);
+      insertUg.run(userId, gid);
     }
   });
   tx();
@@ -98,9 +106,9 @@ export function saveUserSelectedGames(
 }
 
 /**
- * Algorithme de tirage quotidien stratifié (Section 4.3 + correctif d'équité 1 Facile + 1 Moyen + 1 Difficile = 80 pts/jour).
- * - Cap de 5 défis (`validated + submitted`) par jeu et par semaine.
- * - Priorité aux quêtes jamais tirées cette semaine ; fallback sur les quêtes `expired` si le pool neuf est épuisé.
+ * Algorithme de tirage quotidien stratifié sur 2 Semaines (1 Facile 10 pts + 1 Moyen 15 pts + 1 Difficile 25 pts = 50 pts/jour).
+ * - Cap de 4 défis (`validated + submitted`) par jeu et par semaine (reset automatique Lundi Semaine 2 = 8 défis/jeu sur la quinzaine).
+ * - Filtre `unlock_week <= current_week` : débloque les défis Acte II en Semaine 2.
  * - Maximise la variété des jeux (3 jeux distincts en priorité, max 2 du même jeu).
  */
 export function drawDailyQuestsForUser(
@@ -109,11 +117,13 @@ export function drawDailyQuestsForUser(
   now: Date = new Date()
 ): any[] {
   const { dayKey, weekKey } = getParisDayAndWeekKey(now);
+  const lifecycle = getEventSettings(db, now);
+  const currentWeek = lifecycle.current_week;
 
   // Vérifier si le joueur a déjà ses défis du jour
   const currentActive = db
     .prepare(
-      `SELECT da.*, q.title, q.description, q.difficulty, q.points, q.game_id, q.proof_hint, g.name AS game_name, g.emoji AS game_emoji
+      `SELECT da.*, q.title, q.description, q.difficulty, q.points, q.game_id, q.proof_hint, q.unlock_week, g.name AS game_name, g.emoji AS game_emoji
        FROM daily_assignments da
        JOIN quests q ON q.id = da.quest_id
        JOIN games g ON g.id = q.game_id
@@ -138,7 +148,7 @@ export function drawDailyQuestsForUser(
   const candidateGameIds = new Set<string>(userGameRows.map((r) => r.game_id));
   candidateGameIds.add('universal'); // Catégorie Fil Rouge incluse d'office (Décision D10)
 
-  // Compter les défis validated + submitted par jeu sur la semaine en cours
+  // Compter les défis validated + submitted par jeu sur la semaine en cours (week_key)
   const weeklyCountsRows = db
     .prepare(
       `SELECT q.game_id, COUNT(*) AS cnt
@@ -157,7 +167,7 @@ export function drawDailyQuestsForUser(
   let eligibleGames = Array.from(candidateGameIds).filter(
     (gid) => (weeklyGameCount.get(gid) || 0) < MAX_WEEKLY_QUESTS_PER_GAME
   );
-  // Fallback de sécurité si tous les jeux cochés ont atteint le cap de 5
+  // Fallback de sécurité si tous les jeux cochés ont atteint le cap de la semaine
   if (eligibleGames.length === 0) {
     eligibleGames = ['universal', ...Array.from(candidateGameIds)];
   }
@@ -178,17 +188,18 @@ export function drawDailyQuestsForUser(
   const placeholders = eligibleGames.map(() => '?').join(',');
   const allEligibleQuests = db
     .prepare(
-      `SELECT id, game_id, title, description, difficulty, points
+      `SELECT id, game_id, title, description, difficulty, points, COALESCE(unlock_week, 1) AS unlock_week
        FROM quests
-       WHERE active = 1 AND game_id IN (${placeholders})`
+       WHERE active = 1 AND COALESCE(unlock_week, 1) <= ? AND game_id IN (${placeholders})`
     )
-    .all(...eligibleGames) as {
+    .all(currentWeek, ...eligibleGames) as {
     id: string;
     game_id: string;
     title: string;
     description: string;
     difficulty: 'easy' | 'medium' | 'hard';
     points: number;
+    unlock_week: number;
   }[];
 
   const freshPool = shuffle(allEligibleQuests.filter((q) => !neverDrawnExclusion.has(q.id)));
@@ -223,7 +234,6 @@ export function drawDailyQuestsForUser(
   };
 
   for (const targetDiff of targetDifficulties) {
-    // 1. Essayer dans freshPool avec 1 défi max par jeu (3 jeux différents)
     let picked =
       pickOne(freshPool, targetDiff, 1) ||
       pickOne(freshPool, targetDiff, 2) ||
@@ -254,7 +264,7 @@ export function drawDailyQuestsForUser(
 
   return db
     .prepare(
-      `SELECT da.*, q.title, q.description, q.difficulty, q.points, q.game_id, q.proof_hint, g.name AS game_name, g.emoji AS game_emoji
+      `SELECT da.*, q.title, q.description, q.difficulty, q.points, q.game_id, q.proof_hint, q.unlock_week, g.name AS game_name, g.emoji AS game_emoji
        FROM daily_assignments da
        JOIN quests q ON q.id = da.quest_id
        JOIN games g ON g.id = q.game_id
@@ -344,12 +354,13 @@ export function rerollDailyAssignment(
   const excludeIds = new Set(alreadyToday.map((r) => r.quest_id));
   excludeIds.add(assignment.quest_id);
 
+  const currentWeek = getEventSettings(db, now).current_week;
   const candidates = db
     .prepare(
       `SELECT * FROM quests
-       WHERE active = 1 AND difficulty = ? AND game_id IN (${placeholders})`
+       WHERE active = 1 AND difficulty = ? AND COALESCE(unlock_week, 1) <= ? AND game_id IN (${placeholders})`
     )
-    .all(assignment.difficulty, ...gameIds) as any[];
+    .all(assignment.difficulty, currentWeek, ...gameIds) as any[];
 
   const available = shuffle(candidates.filter((c) => !excludeIds.has(c.id)));
   if (available.length === 0) {
@@ -369,6 +380,60 @@ export function rerollDailyAssignment(
   tx();
 
   return drawDailyQuestsForUser(db, userId, now);
+}
+
+/**
+ * Calcule le nombre de Jours Actifs d'un joueur (jours distincts avec ≥ 1 défi validé)
+ * et synchronise automatiquement les paliers de Bonus de Régularité (+20 / +40 / +60 pts) dans `points_ledger`.
+ */
+export function recalculateUserRegularityBonuses(
+  db: Database.Database,
+  userId: string
+): {
+  activeDaysCount: number;
+  totalBonusPoints: number;
+  tiers: { days: number; points: number; unlocked: boolean }[];
+} {
+  const row = db
+    .prepare(
+      `SELECT COUNT(DISTINCT day_key) AS active_days
+       FROM daily_assignments
+       WHERE user_id = ? AND status = 'validated'`
+    )
+    .get(userId) as { active_days: number } | undefined;
+
+  const activeDaysCount = row?.active_days || 0;
+  let totalBonusPoints = 0;
+
+  const tx = db.transaction(() => {
+    for (const tier of REGULARITY_TIERS) {
+      const sourceRef = `${tier.ref}:${userId}`;
+      if (activeDaysCount >= tier.days) {
+        totalBonusPoints += tier.points;
+        db.prepare(
+          `INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label, updated_at)
+           VALUES (?, 'daily', ?, 'async', ?, ?, datetime('now'))
+           ON CONFLICT(source_ref) DO UPDATE SET
+             points = excluded.points,
+             label = excluded.label,
+             updated_at = datetime('now')`
+        ).run(userId, sourceRef, tier.points, tier.label);
+      } else {
+        db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(sourceRef);
+      }
+    }
+  });
+  tx();
+
+  return {
+    activeDaysCount,
+    totalBonusPoints,
+    tiers: REGULARITY_TIERS.map((t) => ({
+      days: t.days,
+      points: t.points,
+      unlocked: activeDaysCount >= t.days,
+    })),
+  };
 }
 
 /**
@@ -405,7 +470,7 @@ export function submitDailyProof(
     throw new Error('Veuillez fournir un fichier (screenshot/clip) ou un lien vidéo externe.');
   }
 
-  // Vérifier le cap de 5 défis par jeu sur la semaine
+  // Vérifier le cap de 4 défis par jeu sur la semaine en cours (reset auto en Semaine 2)
   const countRow = db
     .prepare(
       `SELECT COUNT(*) AS cnt
@@ -506,6 +571,7 @@ export function reviewDailyAssignment(
   });
 
   tx();
+  recalculateUserRegularityBonuses(db, row.user_id);
 
   return db
     .prepare(
@@ -658,8 +724,13 @@ export function submitTmnfReplay(
   if (lifecycle.effective_phase === 'closed') {
     throw new Error('La Hextaz Games Week est clôturée : les dépôts de replays sont fermés.');
   }
+  if (map.is_weekly && lifecycle.effective_phase === 'week1') {
+    throw new Error(
+      '🔒 La Map Serveur 24/7 se débloque en Semaine 2 (Acte II) ! Pendant la Semaine 1, concentrez-vous sur les 8 maps de la Chasse aux Médailles.'
+    );
+  }
   if (map.is_weekly && lifecycle.tmnf_weekly_locked) {
-    throw new Error('Le Chrono Hebdomadaire TMNF est clôturé (cutoff Samedi 20h30 avant la Cup Live).');
+    throw new Error('Le Chrono Serveur TMNF est clôturé (cutoff Samedi 20h30 avant la Cup Live).');
   }
 
   const timeMs = parsed.bestTimeMs;
@@ -1090,7 +1161,7 @@ export function updateFallGuysScoresAndRankings(
 }
 
 /**
- * Classement général HGW (50% Async / 50% Live + éligibilité Tombola >= 300 pts).
+ * Classement général HGW (50% Async / 50% Live + éligibilité Tombola >= 300 pts + Jours Actifs).
  */
 export function getGlobalLeaderboard(db: Database.Database): any[] {
   const rows = db
@@ -1105,6 +1176,7 @@ export function getGlobalLeaderboard(db: Database.Database): any[] {
          COALESCE(SUM(CASE WHEN pl.category = 'live' THEN pl.points ELSE 0 END), 0) AS live_points,
          COALESCE(SUM(pl.points), 0) AS total_points,
          (SELECT COUNT(*) FROM daily_assignments da WHERE da.user_id = u.id AND da.status = 'validated') AS quests_validated,
+         (SELECT COUNT(DISTINCT day_key) FROM daily_assignments da WHERE da.user_id = u.id AND da.status = 'validated') AS active_days_count,
          (SELECT COUNT(DISTINCT map_id) FROM tmnf_submissions ts WHERE ts.user_id = u.id AND ts.points_awarded > 0) AS tmnf_medals_count
        FROM users u
        LEFT JOIN points_ledger pl ON pl.user_id = u.id
@@ -1123,60 +1195,84 @@ export function getGlobalLeaderboard(db: Database.Database): any[] {
 
 export interface EventLifecycleSettings {
   event_name: string;
-  status_mode: 'auto' | 'registration' | 'live' | 'closed';
+  status_mode: 'auto' | 'registration' | 'week1' | 'week2' | 'live' | 'closed';
   start_at: string;
+  week2_start_at: string;
   tmnf_cutoff_at: string;
   end_at: string;
   tmnf_playit_address: string;
   tmnf_join_url: string;
   tmnf_server_login: string;
-  effective_phase: 'registration' | 'live' | 'closed';
+  effective_phase: 'registration' | 'week1' | 'week2' | 'closed';
+  current_week: 1 | 2;
+  tmnf_weekly_unlocked: boolean;
   tmnf_weekly_locked: boolean;
 }
 
 /**
- * Récupère la configuration de l'event (dates de début/fin, phase active, serveur TMNF).
+ * Récupère la configuration de l'event sur 2 semaines (Semaine 1 -> Semaine 2 -> Week-end Final).
  */
 export function getEventSettings(db: Database.Database, now: Date = new Date()): EventLifecycleSettings {
   const rows = db.prepare(`SELECT key, value FROM event_settings`).all() as { key: string; value: string }[];
   const map = new Map(rows.map((r) => [r.key, r.value]));
 
-  const statusMode = (map.get('status_mode') || 'auto') as 'auto' | 'registration' | 'live' | 'closed';
+  const statusMode = (map.get('status_mode') || 'auto') as
+    | 'auto'
+    | 'registration'
+    | 'week1'
+    | 'week2'
+    | 'live'
+    | 'closed';
   const startAt = map.get('start_at') || '2026-11-16T03:00';
-  const tmnfCutoffAt = map.get('tmnf_cutoff_at') || '2026-11-21T20:30';
-  const endAt = map.get('end_at') || '2026-11-22T18:00';
+  const week2StartAt = map.get('week2_start_at') || '2026-11-23T03:00';
+  const tmnfCutoffAt = map.get('tmnf_cutoff_at') || '2026-11-28T20:30';
+  const endAt = map.get('end_at') || '2026-11-29T18:00';
 
   const startMs = Date.parse(startAt);
+  const week2StartMs = Date.parse(week2StartAt);
   const cutoffMs = Date.parse(tmnfCutoffAt);
   const endMs = Date.parse(endAt);
   const nowMs = now.getTime();
 
-  let effectivePhase: 'registration' | 'live' | 'closed' = 'live';
-  if (statusMode === 'registration' || statusMode === 'live' || statusMode === 'closed') {
-    effectivePhase = statusMode;
+  let effectivePhase: 'registration' | 'week1' | 'week2' | 'closed' = 'week1';
+  if (statusMode === 'registration') {
+    effectivePhase = 'registration';
+  } else if (statusMode === 'week1') {
+    effectivePhase = 'week1';
+  } else if (statusMode === 'week2' || statusMode === 'live') {
+    effectivePhase = 'week2';
+  } else if (statusMode === 'closed') {
+    effectivePhase = 'closed';
   } else {
     if (Number.isFinite(startMs) && nowMs < startMs) {
       effectivePhase = 'registration';
     } else if (Number.isFinite(endMs) && nowMs >= endMs) {
       effectivePhase = 'closed';
+    } else if (Number.isFinite(week2StartMs) && nowMs < week2StartMs) {
+      effectivePhase = 'week1';
     } else {
-      effectivePhase = 'live';
+      effectivePhase = 'week2';
     }
   }
 
-  const tmnfWeeklyLocked =
-    effectivePhase === 'closed' || (statusMode === 'auto' && Number.isFinite(cutoffMs) && nowMs >= cutoffMs);
+  const currentWeek: 1 | 2 = effectivePhase === 'week2' || effectivePhase === 'closed' ? 2 : 1;
+  const cutoffPassed = statusMode === 'auto' && Number.isFinite(cutoffMs) && nowMs >= cutoffMs;
+  const tmnfWeeklyUnlocked = effectivePhase === 'week2' && !cutoffPassed;
+  const tmnfWeeklyLocked = effectivePhase === 'closed' || cutoffPassed;
 
   return {
-    event_name: map.get('event_name') || 'Hextaz Games Week (HGW)',
+    event_name: map.get('event_name') || 'Hextaz Games Week (Édition 2 Semaines)',
     status_mode: statusMode,
     start_at: startAt,
+    week2_start_at: week2StartAt,
     tmnf_cutoff_at: tmnfCutoffAt,
     end_at: endAt,
     tmnf_playit_address: map.get('tmnf_playit_address') || 'hgw-tmnf.playit.gg:2350',
     tmnf_join_url: map.get('tmnf_join_url') || 'tmtp://#join=hgw_stadium_2026',
     tmnf_server_login: map.get('tmnf_server_login') || 'hgw_stadium_2026',
     effective_phase: effectivePhase,
+    current_week: currentWeek,
+    tmnf_weekly_unlocked: tmnfWeeklyUnlocked,
     tmnf_weekly_locked: tmnfWeeklyLocked,
   };
 }
@@ -1190,6 +1286,7 @@ export function updateEventSettings(
     event_name: string;
     status_mode: string;
     start_at: string;
+    week2_start_at: string;
     tmnf_cutoff_at: string;
     end_at: string;
     tmnf_playit_address: string;
@@ -1208,6 +1305,7 @@ export function updateEventSettings(
     'event_name',
     'status_mode',
     'start_at',
+    'week2_start_at',
     'tmnf_cutoff_at',
     'end_at',
     'tmnf_playit_address',

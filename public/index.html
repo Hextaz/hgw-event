@@ -61,20 +61,31 @@
       <!-- BARRE DE STATUT PERSONNEL ÉPINGLÉE -->
       <section class="personal-status-bar" id="personal-status-bar"></section>
 
+      <!-- TIMELINE 2 SEMAINES (ACTE I -> ACTE II -> FINALE WEEK-END) -->
+      <section
+        id="two-week-timeline-bar"
+        style="
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+          gap: 0.75rem;
+          margin-bottom: 1.5rem;
+        "
+      ></section>
+
       <!-- VUE 1 : PODIUM TOP 3 + CLASSEMENT GÉNÉRAL + LIVE FEED -->
       <section class="view-section active" id="view-classement">
         <div class="section-header">
           <div>
-            <h1 class="section-title" style="font-size: 1.55rem">🏆 Podium & Classement Général HGW</h1>
+            <h1 class="section-title" style="font-size: 1.55rem">🏆 Podium & Classement Général HGW (Format 2 Semaines)</h1>
             <p class="section-desc">
               Clique sur n'importe quel joueur pour inspecter le détail complet de ses points (`points_ledger`).
               Tous les joueurs à <strong>≥ 300 pts</strong> remportent un ticket pour la <strong>Grande Tombola</strong>
-              du dimanche 18h !
+              du dernier dimanche 18h !
             </p>
           </div>
           <div style="display: flex; gap: 0.5rem; flex-wrap: wrap">
             <button type="button" class="btn btn-primary btn-sm" id="cta-open-quests">
-              🎯 Faire mes 3 Défis (80 pts/j)
+              🎯 Faire mes 3 Défis (50 pts/j + Bonus Régularité)
             </button>
             <button type="button" class="btn btn-secondary btn-sm" id="cta-open-tm">
               🏎️ Chasser les Médailles TMNF
@@ -90,11 +101,11 @@
           <div class="card">
             <div class="card-header" style="flex-wrap: wrap; gap: 0.75rem">
               <div>
-                <h2 class="card-title">📊 Classement Complet (50% Semaine Async / 50% Week-end Live)</h2>
+                <h2 class="card-title">📊 Classement Complet (50% Quinzaine Async / 50% Week-end Final Live)</h2>
               </div>
               <div style="display: flex; gap: 0.75rem; font-size: 0.76rem; color: var(--text-secondary)">
-                <span><strong style="color: var(--accent-emerald)">●</strong> Semaine (Async)</span>
-                <span><strong style="color: var(--accent-sky)">●</strong> Week-end (Live)</span>
+                <span><strong style="color: var(--accent-emerald)">●</strong> Quinzaine (Async)</span>
+                <span><strong style="color: var(--accent-sky)">●</strong> Week-end Final (Live)</span>
               </div>
             </div>
 
@@ -156,22 +167,22 @@
               <span class="badge badge-easy">Live Ledger</span>
             </div>
             <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.85rem">
-              Derniers défis validés, médailles `.Replay.gbx` décrochées et résultats de tournois :
+              Derniers défis validés, paliers de régularité, médailles `.Replay.gbx` et résultats de tournois :
             </p>
             <div class="feed-list" id="live-feed-list"></div>
           </div>
         </div>
       </section>
 
-      <!-- VUE 2 : DÉFIS QUOTIDIENS PERSONNALISÉS & MAÎTRISE HEBDO X/5 -->
+      <!-- VUE 2 : DÉFIS QUOTIDIENS PERSONNALISÉS, RÉGULARITÉ & MAÎTRISE HEBDO X/4 -->
       <section class="view-section" id="view-defis">
         <div class="section-header">
           <div>
-            <h2 class="section-title">🎯 Mes 3 Défis Quotidiens Personnalisés</h2>
+            <h2 class="section-title">🎯 Mes 3 Défis Quotidiens & Paliers de Régularité</h2>
             <p class="section-desc">
               Tirage stratifié équitable chaque nuit à <strong>03h00</strong> :
-              <strong>1 Facile (15 pts) + 1 Moyen (25 pts) + 1 Difficile (40 pts) = 80 pts/jour</strong>.
-              Tu disposes d'<strong>1 Reroll gratuit par jour</strong>.
+              <strong>1 Facile (10 pts) + 1 Moyen (15 pts) + 1 Difficile (25 pts) = 50 pts/jour</strong>, plus jusqu'à
+              <strong>+120 pts de Bonus de Régularité</strong> (paliers à 4, 8 et 12 jours actifs) !
             </p>
           </div>
           <button type="button" class="btn btn-secondary btn-sm" id="toggle-games-drawer-btn" style="display: none">
@@ -179,10 +190,22 @@
           </button>
         </div>
 
-        <!-- JAUGES DE MAÎTRISE HEBDOMADAIRE PAR JEU (X/5) -->
+        <!-- BARRE DES PALIERS DE RÉGULARITÉ / ASSIDUITÉ (+20 / +40 / +60 = +120 PTS) -->
+        <div id="regularity-bonus-strip" style="margin-bottom: 1.25rem"></div>
+
+        <!-- JAUGES DE MAÎTRISE HEBDOMADAIRE PAR JEU (X/4 PAR SEMAINE, RESET EN SEMAINE 2) -->
         <div id="weekly-mastery-section" style="display: none">
-          <div style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.45rem; text-transform: uppercase; letter-spacing: 0.04em">
-            Progression Hebdomadaire par Jeu (Limite de 5 défis validés/soumis max par jeu sur la semaine)
+          <div
+            style="
+              font-size: 0.78rem;
+              color: var(--text-muted);
+              margin-bottom: 0.45rem;
+              text-transform: uppercase;
+              letter-spacing: 0.04em;
+            "
+            id="weekly-mastery-label"
+          >
+            Quota de la Semaine en cours par Jeu (4 défis max / jeu en Semaine 1 puis Reset auto en Semaine 2 = 8 défis/jeu sur 2 semaines)
           </div>
           <div class="mastery-strip" id="weekly-mastery-strip"></div>
         </div>
@@ -209,17 +232,18 @@
         </div>
       </section>
 
-      <!-- VUE 3 : FIL ROUGE TRACKMANIA (.Replay.gbx + 8 CARTES STADIUM) -->
+      <!-- VUE 3 : FIL ROUGE TRACKMANIA (.Replay.gbx + 8 CARTES STADIUM + MAP SERVEUR SEMAINE 2) -->
       <section class="view-section" id="view-trackmania">
         <div class="grid-2" style="margin-bottom: 1.5rem">
           <div class="card">
             <div class="card-header">
-              <h2 class="card-title">🏎️ Serveur Dédié Trackmania Nations Forever</h2>
-              <span class="badge badge-easy">Ouvert 24h/24 • Sans VPN</span>
+              <h2 class="card-title">🏎️ Map Serveur 24/7 (Débloquée en Semaine 2 — Acte II)</h2>
+              <span class="badge badge-easy" id="tmnf-server-phase-badge">Acte II • 150 pts au 1er</span>
             </div>
+            <div id="tmnf-server-week2-banner" style="margin-bottom: 0.85rem"></div>
             <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem">
-              Rejoins le serveur en 1 clic pour rouler sur le <strong>Chrono de la Semaine</strong> (TimeAttack jusqu'à
-              samedi 20h30) et la <strong>Cup Live</strong> (samedi 21h00–21h30, 12 manches max).
+              Pendant la <strong>Semaine 1</strong>, concentre-toi sur les <strong>8 maps de la Chasse aux Médailles</strong>.
+              Dès le lancement de la <strong>Semaine 2</strong>, la Map Finale s'ouvre sur le serveur dédié 24h/24 (TimeAttack jusqu'au dernier samedi 20h30, puis <strong>Cup Live</strong> à 21h00).
             </p>
             <div
               style="
@@ -251,7 +275,7 @@
 
             <!-- TOP 10 CHRONO DE LA SEMAINE COMPACT -->
             <div style="font-weight: 700; font-size: 0.92rem; margin-bottom: 0.5rem">
-              ⏱️ Top 10 — Chrono de la Semaine (150 / 110 / 80 / 50 / 30 pts)
+              ⏱️ Top 10 — Map Serveur Semaine 2 (150 / 110 / 80 / 50 / 30 pts)
             </div>
             <div class="table-wrap">
               <table class="hgw-table">
@@ -470,7 +494,7 @@
           <div class="card">
             <div class="card-header">
               <h3 class="card-title">📸 3. Envoyer une preuve de Défi Quotidien en 3 secondes</h3>
-              <span class="badge badge-medium">3 défis / jour (80 pts/j)</span>
+              <span class="badge badge-medium">3 défis/j (50 pts/j) + Régularité (+120 pts)</span>
             </div>
             <ul style="padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.6rem; font-size: 0.88rem; color: var(--text-secondary)">
               <li>
@@ -481,9 +505,9 @@
                 créer de fichier !
               </li>
               <li>
-                <strong>Pour les défis demandant un Clip vidéo (10–15s) :</strong> Utilise <em>Medal.tv</em>,
-                <em>NVIDIA ShadowPlay</em>, <em> barre de jeu Xbox (`Win + Alt + G`)</em> ou le bouton Capture de la
-                Switch, puis colle le lien ou le fichier `.mp4`.
+                <strong>Paliers de Régularité (+120 pts sur 2 semaines) :</strong> Valider au moins 1 défi par jour
+                débloque automatiquement <strong>+20 pts (4j actifs)</strong>, <strong>+40 pts (8j actifs)</strong> et
+                <strong>+60 pts (12j actifs)</strong> !
               </li>
               <li>
                 <strong>1 Reroll gratuit par jour :</strong> Si tu tombes sur un défi qui ne t'inspire pas, clique sur
@@ -492,22 +516,22 @@
             </ul>
           </div>
 
-          <!-- GUIDE 4 : PLANNING OFFICIEL & BARÈME 50/50 -->
+          <!-- GUIDE 4 : PLANNING OFFICIEL SUR 2 SEMAINES & BARÈME 50/50 -->
           <div class="card">
             <div class="card-header">
-              <h3 class="card-title">📅 4. Planning du Week-end & Règles d'Équilibrage</h3>
+              <h3 class="card-title">📅 4. Planning Officiel sur 2 Semaines (Acte I ➔ Acte II ➔ Finale)</h3>
               <span class="badge badge-hard">50% Async / 50% Live</span>
             </div>
             <ul style="padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.86rem; color: var(--text-secondary)">
-              <li><strong>Lundi ➔ Vendredi :</strong> Défis quotidiens (reset 03h00) + Serveur Trackmania 24h/24.</li>
-              <li><strong>Vendredi 20h00 :</strong> 🎙️ Kickoff en vocal Discord (point classement & questions).</li>
-              <li><strong>Samedi 15h00 (Check-in 14h45) :</strong> 🥊 <strong>Tournoi #1 — Brawlhalla</strong> (1er = 200 pts).</li>
-              <li><strong>Samedi 20h30 :</strong> 🏁 Clôture du Chrono Hebdo Trackmania + Échauffement serveur.</li>
-              <li><strong>Samedi 21h00 – 21h30 :</strong> 🏎️ <strong>Tournoi #2 — Cup Trackmania Live</strong> (12 courses max, 1er = 150 pts).</li>
-              <li><strong>Samedi 21h30 :</strong> 🎲 Tirage au sort en direct des équipes par <strong>Chapeaux (Pool 1 + 2 + 3)</strong>.</li>
-              <li><strong>Samedi 21h45 – 23h15 :</strong> 🚗 <strong>Tournoi #3 — Rocket League RUMBLE</strong> (1er = 300 pts / joueur).</li>
-              <li><strong>Dimanche 16h00 – 17h00 :</strong> 🫘 <strong>Tournoi #4 — Fall Guys</strong> (5 parties cumulées, 1er = 200 pts).</li>
-              <li><strong>Dimanche 18h00 :</strong> 🎉 <strong>Podium Final & Tirage de la Grande Tombola (seuil ≥ 300 pts)</strong> !</li>
+              <li><strong>Semaine 1 (Acte I) :</strong> Défis Quotidiens S1 (`50 pts/j`) + <strong>8 Maps Médailles Solo TMNF (`240 pts`)</strong>.</li>
+              <li><strong>Lundi Semaine 2 (Acte II) :</strong> 🔓 <strong>Ouverture de la Map Serveur TMNF 24/7 (`150 pts`)</strong> + Déblocage des Défis Acte II + Reset du quota de 4 défis/jeu !</li>
+              <li><strong>Dernier Samedi 15h00 :</strong> 🥊 <strong>Tournoi #1 — Brawlhalla</strong> (1er = 200 pts).</li>
+              <li><strong>Dernier Samedi 20h30 :</strong> 🏁 Clôture du Chrono Serveur TMNF + Échauffement.</li>
+              <li><strong>Dernier Samedi 21h00 – 21h30 :</strong> 🏎️ <strong>Tournoi #2 — Cup Trackmania Live</strong> (1er = 150 pts).</li>
+              <li><strong>Dernier Samedi 21h30 :</strong> 🎲 Tirage en direct des équipes par <strong>Chapeaux (Pool 1 + 2 + 3)</strong>.</li>
+              <li><strong>Dernier Samedi 21h45 – 23h15 :</strong> 🚗 <strong>Tournoi #3 — Rocket League RUMBLE</strong> (1er = 300 pts / joueur).</li>
+              <li><strong>Dernier Dimanche 16h00 – 17h00 :</strong> 🫘 <strong>Tournoi #4 — Fall Guys</strong> (5 parties cumulées, 1er = 200 pts).</li>
+              <li><strong>Dernier Dimanche 18h00 :</strong> 🎉 <strong>Podium Final & Tirage de la Grande Tombola (seuil ≥ 300 pts)</strong> !</li>
             </ul>
           </div>
         </div>
@@ -519,7 +543,7 @@
           <div>
             <h2 class="section-title">🛡️ Dashboard Organisateur HGW (Cockpit Admin)</h2>
             <p class="section-desc">
-              Pilote les dates de début et de fin de la HGW, valide les preuves avec aperçu direct, gère les Chapeaux et
+              Pilote les dates des 2 semaines (Acte I / Acte II / Finale), valide les preuves avec aperçu direct, gère les Chapeaux et
               classements des tournois, sauvegarde la base SQLite et lance la Roue de la Tombola.
             </p>
           </div>
@@ -559,15 +583,15 @@
           "
         ></div>
 
-        <!-- CONFIGURATION DES DATES DE DÉBUT / FIN DE LA HGW & SERVEUR TMNF -->
+        <!-- CONFIGURATION DES DATES DE DÉBUT / SEMAINE 2 / FIN DE LA HGW & SERVEUR TMNF -->
         <div class="card" style="margin-bottom: 1.5rem">
           <div class="card-header">
             <div>
-              <h3 class="card-title">📅 Programmation Officielle : Début, Clôture TMNF & Fin de la HGW</h3>
+              <h3 class="card-title">📅 Programmation Officielle 2 Semaines : Semaine 1 (Acte I), Semaine 2 (Acte II) & Finale</h3>
               <p class="section-desc">
-                Définis quand démarre et quand se termine la HGW. En mode <strong>Automatique</strong>, le site passe
-                tout seul de <em>Pré-Inscriptions</em> ➔ <em>Event En Cours</em> ➔ <em>Event Clôturé</em> aux dates
-                indiquées.
+                En mode <strong>Automatique</strong>, le site passe tout seul de <em>Pré-Inscriptions</em> ➔
+                <em>Semaine 1 (8 Maps Solo)</em> ➔ <em>Semaine 2 (Déblocage Serveur 24/7 + Défis Acte II)</em> ➔
+                <em>Event Clôturé</em>.
               </p>
             </div>
             <span class="badge badge-hard" id="admin-phase-badge">Phase : En cours</span>
@@ -582,42 +606,51 @@
                 <select id="cfg-status-mode" class="select-field">
                   <option value="auto">🤖 Automatique selon les dates ci-contre</option>
                   <option value="registration">📝 Forcer : Inscriptions Pré-Event</option>
-                  <option value="live">🔥 Forcer : Event En Cours (Ouvert)</option>
+                  <option value="week1">🌱 Forcer : Semaine 1 — Acte I (8 Maps Solo, Serveur verrouillé)</option>
+                  <option value="week2">🔥 Forcer : Semaine 2 — Acte II (Serveur 24/7 + Défis S2 ouverts)</option>
                   <option value="closed">🔒 Forcer : Event Clôturé (Gel des points)</option>
                 </select>
               </div>
               <div>
                 <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
-                  🟢 Début officiel de la HGW (Lundi)
+                  🟢 Début Semaine 1 — Acte I (Lundi S1)
                 </label>
                 <input type="datetime-local" id="cfg-start-at" class="input-field mono" />
               </div>
               <div>
                 <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
-                  🏁 Fin du Chrono Hebdo TMNF (Samedi 20h30)
+                  🔓 Début Semaine 2 — Acte II & Serveur TMNF (Lundi S2)
                 </label>
-                <input type="datetime-local" id="cfg-tmnf-cutoff-at" class="input-field mono" />
+                <input type="datetime-local" id="cfg-week2-start-at" class="input-field mono" />
               </div>
             </div>
 
             <div class="grid-3" style="margin-bottom: 1rem">
               <div>
                 <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
-                  🔴 Fin de la HGW & Cérémonie (Dimanche 18h00)
+                  🏁 Fin du Chrono Serveur TMNF (Dernier Samedi 20h30)
+                </label>
+                <input type="datetime-local" id="cfg-tmnf-cutoff-at" class="input-field mono" />
+              </div>
+              <div>
+                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                  🔴 Fin de la HGW & Cérémonie (Dernier Dimanche 18h00)
                 </label>
                 <input type="datetime-local" id="cfg-end-at" class="input-field mono" />
               </div>
-              <div>
-                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
-                  🏎️ Adresse Tunnel `playit.gg` (Serveur TMNF)
-                </label>
-                <input type="text" id="cfg-playit-addr" class="input-field mono" placeholder="hgw-tmnf.playit.gg:2350" />
-              </div>
-              <div>
-                <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
-                  🗺️ UID de la Map Perso Hebdo TMNF (`<challenge uid="...">`)
-                </label>
-                <input type="text" id="cfg-weekly-uid" class="input-field mono" placeholder="UID de ta map HGW" />
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem">
+                <div>
+                  <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                    🏎️ Tunnel `playit.gg`
+                  </label>
+                  <input type="text" id="cfg-playit-addr" class="input-field mono" placeholder="hgw-tmnf.playit.gg:2350" />
+                </div>
+                <div>
+                  <label style="display: block; font-size: 0.76rem; color: var(--text-muted); margin-bottom: 0.3rem">
+                    🗺️ UID Map Serveur S2
+                  </label>
+                  <input type="text" id="cfg-weekly-uid" class="input-field mono" placeholder="UID map S2" />
+                </div>
               </div>
             </div>
 

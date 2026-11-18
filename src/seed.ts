@@ -18,6 +18,7 @@ export interface SeedQuest {
   difficulty: 'easy' | 'medium' | 'hard';
   points: number;
   proof_hint: string;
+  unlock_week?: number;
 }
 
 export const GAMES_CATALOG: SeedGame[] = [
@@ -735,16 +736,130 @@ export const QUESTS_CATALOG: SeedQuest[] = [
     title: 'Grand Maître du Clavier & Tetris',
     description: 'Atteindre ≥ 105 WPM (≥ 98% précision, 30s) sur Monkeytype OU terminer 40 Lignes en moins de 1m05s sur TETR.IO.',
     difficulty: 'hard',
-    points: 40,
+    points: 25,
     proof_hint: 'Screenshot complet du résultat Monkeytype (≥ 105 WPM) ou TETR.IO (< 1:05).',
+  },
+
+  // ==========================================================================
+  // DÉFIS EXCLUSIFS SEMAINE 2 (ACTE II — unlock_week = 2)
+  // ==========================================================================
+  {
+    id: 'splatoon_s2_hard',
+    game_id: 'splatoon',
+    title: '[Acte II] Maître de l’Anarchie',
+    description: 'Remporter une victoire par K.-O. (Knockout 100 à 0) en Match Anarchie (Expédition Risquée, Mission Bazookarpe, Défense de Zone ou Pluie de Palourdes).',
+    difficulty: 'hard',
+    points: 25,
+    proof_hint: 'Screenshot de l’écran final affichant K.-O. ! en Match Anarchie.',
+    unlock_week: 2,
+  },
+  {
+    id: 'wii_s2_med',
+    game_id: 'wii_sports',
+    title: '[Acte II] Maître du Resort',
+    description: 'Obtenir un rang Pro (ou battre un adversaire de niveau ≥ 1000) dans n’importe quelle discipline de Wii Sports / Wii Sports Resort.',
+    difficulty: 'medium',
+    points: 15,
+    proof_hint: 'Screenshot de l’écran de niveau ou de victoire.',
+    unlock_week: 2,
+  },
+  {
+    id: 'pokemon_s2_med',
+    game_id: 'pokemon',
+    title: '[Acte II] Stratège Sans Échange (No-Switch)',
+    description: 'Gagner un match Random Battle sur Pokémon Showdown sans jamais rappeler volontairement un Pokémon en vie (changement uniquement après un K.-O. ou attaque Demi-Tour/Change-Éclair).',
+    difficulty: 'medium',
+    points: 15,
+    proof_hint: 'Lien du replay Pokémon Showdown.',
+    unlock_week: 2,
+  },
+  {
+    id: 'cod_s2_hard',
+    game_id: 'cod',
+    title: '[Acte II] Série Impitoyable',
+    description: 'Débloquer son plus gros Scorestreak / Killstreak équipé dans une partie Multijoueur OU faire Top 3 en Warzone.',
+    difficulty: 'hard',
+    points: 25,
+    proof_hint: 'Clip ou screenshot du Scorestreak activé ou du Top 3 Warzone.',
+    unlock_week: 2,
+  },
+  {
+    id: 'gd_s2_med',
+    game_id: 'geometry_dash',
+    title: '[Acte II] Speedrunner du Weekly / Gauntlet',
+    description: 'Atteindre au moins 40% sur le Weekly Demon en cours OU terminer un niveau complet d’un Gauntlet officiel.',
+    difficulty: 'medium',
+    points: 15,
+    proof_hint: 'Screenshot de la progression Weekly Demon ≥ 40% ou niveau Gauntlet à 100%.',
+    unlock_week: 2,
+  },
+  {
+    id: 'val_s2_hard',
+    game_id: 'valorant',
+    title: '[Acte II] Clutch ou Quitte',
+    description: 'Remporter un round en situation de Clutch (1v2 minimum) OU terminer un match avec au moins 35% de Headshots (min. 12 kills).',
+    difficulty: 'hard',
+    points: 25,
+    proof_hint: 'Clip du Clutch 1v2+ ou screenshot de l’onglet Performance (≥ 35% HS).',
+    unlock_week: 2,
+  },
+  {
+    id: 'rl_s2_med',
+    game_id: 'rocket_league',
+    title: '[Acte II] Passeur Décisif & Muraille',
+    description: 'Cumuler au moins 2 passes décisives (Assists) ET 2 arrêts (Saves) dans la même partie en ligne gagnée.',
+    difficulty: 'medium',
+    points: 15,
+    proof_hint: 'Screenshot du tableau des scores final (≥ 2 Assists et ≥ 2 Saves).',
+    unlock_week: 2,
+  },
+  {
+    id: 'tmnf_s2_hard',
+    game_id: 'tmnf',
+    title: '[Acte II] Chasseur du Serveur HGW 24/7',
+    description: 'Établir un chrono sous la Médaille Or (≤ 0:45.000) sur la Map Finale du Serveur Dédié HGW 24/7 débloquée en Semaine 2.',
+    difficulty: 'hard',
+    points: 25,
+    proof_hint: 'Chrono enregistré automatiquement sur le serveur HGW ou fichier .Replay.gbx.',
+    unlock_week: 2,
+  },
+  {
+    id: 'fg_s2_med',
+    game_id: 'fall_guys',
+    title: '[Acte II] Qualifié Sans Chute',
+    description: 'Se qualifier sur une manche de Course dans le Top 20% OU atteindre la Finale deux parties de suite.',
+    difficulty: 'medium',
+    points: 15,
+    proof_hint: 'Screenshot du badge Top 20% Or/Argent ou des 2 finales.',
+    unlock_week: 2,
+  },
+  {
+    id: 'brawl_s2_med',
+    game_id: 'brawlhalla',
+    title: '[Acte II] Dégâts Colossaux (500+ DMG)',
+    description: 'Infliger plus de 500 points de dégâts dans un seul match 1v1 ou 2v2 en ligne et remporter la victoire.',
+    difficulty: 'medium',
+    points: 15,
+    proof_hint: 'Screenshot de l’écran des statistiques de fin de match (≥ 500 dégâts).',
+    unlock_week: 2,
+  },
+  {
+    id: 'web_s2_easy',
+    game_id: 'universal',
+    title: '[Acte II] Défi Flash Navigateur',
+    description: 'Atteindre un score ≥ 10 au Chimp Test / Aim Trainer (< 400 ms) sur HumanBenchmark OU résoudre le Tusmo du jour.',
+    difficulty: 'easy',
+    points: 10,
+    proof_hint: 'Screenshot complet du résultat HumanBenchmark ou Tusmo.',
+    unlock_week: 2,
   },
 ];
 
 export const TMNF_MAPS_CATALOG = [
   {
     id: 'weekly_hgw',
-    code: 'HGW-WEEKLY',
-    name: 'Chrono de la Semaine — HGW Stadium Special',
+    code: 'HGW-FINALE-S2',
+    name: 'Map Serveur 24/7 (Débloquée en Semaine 2) — HGW Stadium Special',
     uid: process.env.TMNF_WEEKLY_MAP_UID || 'HGW_WEEKLY_STADIUM_UID_2026',
     environment: 'Stadium',
     is_weekly: 1,
@@ -866,8 +981,8 @@ export const TOURNAMENTS_CATALOG = [
     name: 'Tournoi #1 — Brawlhalla',
     emoji: '🥊',
     game_id: 'brawlhalla',
-    scheduled_label: 'Samedi 15h00 (Check-in 14h45)',
-    scheduled_iso: '2026-11-21T15:00:00+01:00',
+    scheduled_label: 'Dernier Samedi 15h00 (Check-in 14h45)',
+    scheduled_iso: '2026-11-28T15:00:00+01:00',
     mode_label: 'Bracket Double Élimination (1v1 / 2v2 Équilibré)',
     team_size: 1,
     is_major: 0,
@@ -889,8 +1004,8 @@ export const TOURNAMENTS_CATALOG = [
     name: 'Tournoi #2 — Cup Trackmania Live',
     emoji: '🏎️',
     game_id: 'tmnf',
-    scheduled_label: 'Samedi 21h00 – 21h30 (Échauffement 20h30)',
-    scheduled_iso: '2026-11-21T21:00:00+01:00',
+    scheduled_label: 'Dernier Samedi 21h00 – 21h30 (Échauffement 20h30)',
+    scheduled_iso: '2026-11-28T21:00:00+01:00',
     mode_label: 'Course en direct sur le serveur HGW (12 manches max, 30 min)',
     team_size: 1,
     is_major: 0,
@@ -910,8 +1025,8 @@ export const TOURNAMENTS_CATALOG = [
     name: 'Tournoi #3 — Rocket League RUMBLE',
     emoji: '🚗',
     game_id: 'rocket_league',
-    scheduled_label: 'Samedi 21h45 – 23h15 (Tirage Chapeaux 21h30)',
-    scheduled_iso: '2026-11-21T21:45:00+01:00',
+    scheduled_label: 'Dernier Samedi 21h45 – 23h15 (Tirage Chapeaux 21h30)',
+    scheduled_iso: '2026-11-28T21:45:00+01:00',
     mode_label: 'Tournoi Majeur — Équipes équilibrées par Chapeaux (Pool 1 + 2 + 3)',
     team_size: 3,
     is_major: 1,
@@ -933,8 +1048,8 @@ export const TOURNAMENTS_CATALOG = [
     name: 'Tournoi #4 — Fall Guys (5 Shows)',
     emoji: '🫘',
     game_id: 'fall_guys',
-    scheduled_label: 'Dimanche 16h00 – 17h00 (Clôture & Tombola 18h00)',
-    scheduled_iso: '2026-11-22T16:00:00+01:00',
+    scheduled_label: 'Dernier Dimanche 16h00 – 17h00 (Clôture & Tombola 18h00)',
+    scheduled_iso: '2026-11-29T16:00:00+01:00',
     mode_label: 'Salon privé — Cumul des 5 parties (Couronne=10, Finale=6, Qualif M1=3, Élim=1)',
     team_size: 1,
     is_major: 0,
@@ -953,6 +1068,12 @@ export const TOURNAMENTS_CATALOG = [
   },
 ];
 
+export const QUEST_POINTS_BY_DIFFICULTY: Record<'easy' | 'medium' | 'hard', number> = {
+  easy: 10,
+  medium: 15,
+  hard: 25,
+};
+
 export function seedDatabase(db: Database.Database): void {
   const upsertGame = db.prepare(`
     INSERT INTO games (id, name, short_name, emoji, platforms, is_universal, sort_order)
@@ -967,15 +1088,16 @@ export function seedDatabase(db: Database.Database): void {
   `);
 
   const upsertQuest = db.prepare(`
-    INSERT INTO quests (id, game_id, title, description, difficulty, points, proof_hint, active)
-    VALUES (@id, @game_id, @title, @description, @difficulty, @points, @proof_hint, 1)
+    INSERT INTO quests (id, game_id, title, description, difficulty, points, proof_hint, unlock_week, active)
+    VALUES (@id, @game_id, @title, @description, @difficulty, @points, @proof_hint, @unlock_week, 1)
     ON CONFLICT(id) DO UPDATE SET
       game_id = excluded.game_id,
       title = excluded.title,
       description = excluded.description,
       difficulty = excluded.difficulty,
       points = excluded.points,
-      proof_hint = excluded.proof_hint
+      proof_hint = excluded.proof_hint,
+      unlock_week = excluded.unlock_week
   `);
 
   const upsertMap = db.prepare(`
@@ -1016,11 +1138,12 @@ export function seedDatabase(db: Database.Database): void {
   `);
 
   const defaultSettings: [string, string][] = [
-    ['event_name', 'Hextaz Games Week (HGW)'],
-    ['status_mode', 'auto'], // 'auto' | 'registration' | 'live' | 'closed'
+    ['event_name', 'Hextaz Games Week (Édition 2 Semaines)'],
+    ['status_mode', 'auto'], // 'auto' | 'registration' | 'week1' | 'week2' | 'live' | 'closed'
     ['start_at', '2026-11-16T03:00'],
-    ['tmnf_cutoff_at', '2026-11-21T20:30'],
-    ['end_at', '2026-11-22T18:00'],
+    ['week2_start_at', '2026-11-23T03:00'],
+    ['tmnf_cutoff_at', '2026-11-28T20:30'],
+    ['end_at', '2026-11-29T18:00'],
     ['tmnf_playit_address', process.env.TMNF_PLAYIT_ADDRESS || 'hgw-tmnf.playit.gg:2350'],
     ['tmnf_join_url', process.env.TMNF_JOIN_URL || 'tmtp://#join=hgw_stadium_2026'],
     ['tmnf_server_login', process.env.TMNF_SERVER_LOGIN || 'hgw_stadium_2026'],
@@ -1028,7 +1151,13 @@ export function seedDatabase(db: Database.Database): void {
 
   const tx = db.transaction(() => {
     for (const g of GAMES_CATALOG) upsertGame.run(g);
-    for (const q of QUESTS_CATALOG) upsertQuest.run(q);
+    for (const q of QUESTS_CATALOG) {
+      upsertQuest.run({
+        ...q,
+        points: QUEST_POINTS_BY_DIFFICULTY[q.difficulty],
+        unlock_week: q.unlock_week || 1,
+      });
+    }
     for (const m of TMNF_MAPS_CATALOG) upsertMap.run(m);
     for (const t of TOURNAMENTS_CATALOG) upsertTournament.run(t);
     for (const [k, v] of defaultSettings) insertSetting.run(k, v);

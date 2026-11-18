@@ -45,11 +45,11 @@ async function runTests() {
   assert.equal(saved.selectedGames.length, 4);
   assert.equal(saved.assignmentsCreated, 3, '3 défis doivent être tirés immédiatement à l’inscription');
 
-  // 2. Vérification du tirage stratifié (1 Facile 15 pts + 1 Moyen 25 pts + 1 Difficile 40 pts = 80 pts/jour)
+  // 2. Vérification du tirage stratifié (1 Facile 10 pts + 1 Moyen 15 pts + 1 Difficile 25 pts = 50 pts/jour)
   const day1Quests = drawDailyQuestsForUser(db, 'u1', new Date('2026-11-16T12:00:00Z'));
   assert.equal(day1Quests.length, 3);
   const totalDay1Potential = day1Quests.reduce((acc, q) => acc + q.points, 0);
-  assert.equal(totalDay1Potential, 80, 'Le potentiel journalier doit être exactement de 80 pts (15 + 25 + 40)');
+  assert.equal(totalDay1Potential, 50, 'Le potentiel journalier sur 2 semaines doit être exactement de 50 pts (10 + 15 + 25)');
 
   // 3. Test du Reroll quotidien (1 max par jour, même difficulté conservée)
   const questToReroll = day1Quests[0];
@@ -66,17 +66,17 @@ async function runTests() {
     'Un 2e reroll le même jour doit être bloqué'
   );
 
-  // 4. Simulation des 7 jours complets de la semaine (anti-épuisement du pool)
-  for (let dayOffset = 1; dayOffset < 7; dayOffset++) {
+  // 4. Simulation des 12 jours complets de la quinzaine (Semaine 1 + Semaine 2 avec reset du quota hebdo et déblocage Acte II)
+  for (let dayOffset = 1; dayOffset < 12; dayOffset++) {
     const simDate = new Date(Date.UTC(2026, 10, 16 + dayOffset, 10, 0, 0));
     const resetRes = runNightlyDailyReset(db, simDate);
     assert.equal(resetRes.usersProcessed, 1);
     const drawn = drawDailyQuestsForUser(db, 'u1', simDate);
-    assert.equal(drawn.length, 3, `Jour J+${dayOffset} doit toujours tirer 3 défis sans épuisement`);
+    assert.equal(drawn.length, 3, `Jour J+${dayOffset} doit toujours tirer 3 défis sans épuisement sur les 2 semaines`);
   }
 
   // 5. Soumission de preuve, refus avec motif, re-soumission et validation
-  const latestQuests = drawDailyQuestsForUser(db, 'u1', new Date(Date.UTC(2026, 10, 22, 10, 0, 0)));
+  const latestQuests = drawDailyQuestsForUser(db, 'u1', new Date(Date.UTC(2026, 10, 27, 10, 0, 0)));
   const qTarget = latestQuests[0];
 
   submitDailyProof(db, {
@@ -217,8 +217,32 @@ async function runTests() {
     'Le total de u1 dans points_ledger doit être Défi + Médaille Auteur (30) + 1er Fall Guys (200)'
   );
 
-  // 8. Test de la remontée automatique depuis le serveur dédié Trackmania (XML-RPC Webhook)
+  // 8. Test du phasage 2 Semaines : Map Serveur 24/7 verrouillée en Semaine 1 puis débloquée en Semaine 2
   const weeklyMap = db.prepare(`SELECT * FROM tmnf_maps WHERE is_weekly = 1 LIMIT 1`).get() as any;
+  updateEventSettings(db, { status_mode: 'week1' });
+  assert.equal(getEventSettings(db).tmnf_weekly_unlocked, false);
+
+  const weeklyReplayBuf = buildSampleReplayGbx({
+    mapUid: weeklyMap.uid,
+    bestTimeMs: 42100,
+    playerLogin: 'hextaz_tm',
+    nonce: 'week1_blocked_weekly',
+  });
+  assert.throws(
+    () =>
+      submitTmnfReplay(db, {
+        userId: 'u1',
+        buffer: weeklyReplayBuf,
+        fileName: 'weekly_s1.Replay.gbx',
+      }),
+    /Semaine 2/,
+    'La Map Serveur 24/7 doit être verrouillée durant la Semaine 1 (Acte I)'
+  );
+
+  // Déblocage en Semaine 2 (Acte II) + remontée automatique depuis le serveur dédié Trackmania (XML-RPC Webhook)
+  updateEventSettings(db, { status_mode: 'week2' });
+  assert.equal(getEventSettings(db).tmnf_weekly_unlocked, true);
+
   const liveFinishWeekly = recordTmnfLiveServerFinish(db, {
     playerLogin: 'hextaz_tm',
     playerNickname: 'Hextaz',
@@ -235,6 +259,24 @@ async function runTests() {
     qTarget.points + 30 + 200 + 150,
     'Le 1er temps sur la map hebdo depuis le serveur dédié doit créditer automatiquement +150 pts au classement général'
   );
+
+  // 8b. Test du Bonus de Régularité (+20 pts dès 4 jours actifs validés)
+  const otherDaysAssignments = db
+    .prepare(
+      `SELECT id, day_key FROM daily_assignments WHERE user_id = 'u1' AND day_key != '2026-11-27' GROUP BY day_key LIMIT 3`
+    )
+    .all() as any[];
+  assert.equal(otherDaysAssignments.length, 3);
+  for (const a of otherDaysAssignments) {
+    db.prepare(`UPDATE daily_assignments SET status = 'open' WHERE id = ?`).run(a.id);
+    submitDailyProof(db, { userId: 'u1', assignmentId: a.id, proofUrl: `https://medal.tv/clip/${a.day_key}` });
+    reviewDailyAssignment(db, { assignmentId: a.id, action: 'approve', reviewerId: 'Modo' });
+  }
+  const regEntry = db
+    .prepare(`SELECT * FROM points_ledger WHERE source_ref = 'regularity:tier_4:u1'`)
+    .get() as any;
+  assert.ok(regEntry, '4 jours actifs distincts doivent déclencher automatiquement le palier +20 pts de Régularité');
+  assert.equal(regEntry.points, 20);
 
   // 9. Tests V3 : Anti-partage de login TMNF inter-joueurs, Classement par piste & Verrouillage de fin d'événement
   const stolenLoginReplay = buildSampleReplayGbx({
@@ -292,7 +334,7 @@ async function runTests() {
     'Aucun replay ne peut être soumis lorsque l’événement est clôturé'
   );
 
-  console.log('✅ Tous les tests unitaires et d’intégration HGW (V1 + V2 + V3) sont passés avec succès !');
+  console.log('✅ Tous les tests unitaires et d’intégration HGW (V1 + V2 + V3 + Format 2 Semaines) sont passés avec succès !');
 }
 
 runTests().catch((err) => {

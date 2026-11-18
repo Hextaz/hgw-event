@@ -17,6 +17,8 @@ import {
   getMapLeaderboard,
   getParisDayAndWeekKey,
   grantManualPoints,
+  MAX_WEEKLY_QUESTS_PER_GAME,
+  recalculateUserRegularityBonuses,
   recalculateWeeklyTmnfLeaderboard,
   recordTmnfLiveServerFinish,
   recordTournamentPlacements,
@@ -410,6 +412,15 @@ app.get('/api/state', (req: AuthedRequest, res) => {
   let mySelectedGames: string[] = [];
   let myDailyQuests: any[] = [];
   let myWeeklyGameCounts: Record<string, number> = {};
+  let myRegularity: any = {
+    activeDaysCount: 0,
+    totalBonusPoints: 0,
+    tiers: [
+      { days: 4, points: 20, unlocked: false },
+      { days: 8, points: 40, unlocked: false },
+      { days: 12, points: 60, unlocked: false },
+    ],
+  };
   let myTmnfSubmissions: any[] = [];
   let myLedger: any[] = [];
   let canRerollToday = false;
@@ -422,6 +433,8 @@ app.get('/api/state', (req: AuthedRequest, res) => {
     if (mySelectedGames.length >= 4) {
       myDailyQuests = drawDailyQuestsForUser(db, req.user.id);
     }
+
+    myRegularity = recalculateUserRegularityBonuses(db, req.user.id);
 
     const weeklyRows = db
       .prepare(
@@ -499,6 +512,7 @@ app.get('/api/state', (req: AuthedRequest, res) => {
     dayKey,
     weekKey,
     eventSettings,
+    maxWeeklyQuestsPerGame: MAX_WEEKLY_QUESTS_PER_GAME,
     oauthConfigured: Boolean(process.env.DISCORD_CLIENT_ID?.trim()),
     allowDevLogin: process.env.ALLOW_DEV_LOGIN === 'true' || !process.env.DISCORD_CLIENT_ID?.trim(),
     botStatus: bot.getStatus(),
@@ -512,6 +526,7 @@ app.get('/api/state', (req: AuthedRequest, res) => {
     mySelectedGames,
     myDailyQuests,
     myWeeklyGameCounts,
+    myRegularity,
     canRerollToday,
     myTmnfSubmissions,
     myLedger,
@@ -1122,6 +1137,8 @@ app.post('/api/admin/seed-demo', requireAdmin, (_req: AuthedRequest, res) => {
 
   const weeklyMap = db.prepare(`SELECT * FROM tmnf_maps WHERE is_weekly = 1 LIMIT 1`).get() as any;
   const medal1 = db.prepare(`SELECT * FROM tmnf_maps WHERE id = 'medal_1'`).get() as any;
+  const medal2 = db.prepare(`SELECT * FROM tmnf_maps WHERE id = 'medal_2'`).get() as any;
+  const currentSettings = getEventSettings(db);
 
   for (const p of demoRoster) {
     db.prepare(
@@ -1159,26 +1176,13 @@ app.post('/api/admin/seed-demo', requireAdmin, (_req: AuthedRequest, res) => {
       ).run(tid, p.id, p.pool);
     }
 
-    // Soumettre un replay sur la map hebdo et A01-Race si pas encore fait
+    // Soumettre des replays sur A01-Race et A02-Race (et sur la Map Serveur 24/7 si Semaine 2 est ouverte)
     const existingSub = db
       .prepare(`SELECT COUNT(*) AS cnt FROM tmnf_submissions WHERE user_id = ?`)
       .get(p.id) as { cnt: number };
 
-    if (existingSub.cnt === 0 && weeklyMap && medal1) {
-      const bufWeekly = buildSampleReplayGbx({
-        mapUid: weeklyMap.uid,
-        bestTimeMs: p.tmMs,
-        playerLogin: p.name.toLowerCase(),
-        playerNickname: p.name,
-        nonce: `weekly_${p.id}`,
-      });
-      submitTmnfReplay(db, {
-        userId: p.id,
-        buffer: bufWeekly,
-        fileName: `${p.name}_weekly.Replay.gbx`,
-      });
-
-      const bufMedal = buildSampleReplayGbx({
+    if (existingSub.cnt === 0 && medal1) {
+      const bufMedal1 = buildSampleReplayGbx({
         mapUid: medal1.uid,
         bestTimeMs: medal1.author_ms + (p.pool - 1) * 900,
         playerLogin: p.name.toLowerCase(),
@@ -1187,9 +1191,39 @@ app.post('/api/admin/seed-demo', requireAdmin, (_req: AuthedRequest, res) => {
       });
       submitTmnfReplay(db, {
         userId: p.id,
-        buffer: bufMedal,
+        buffer: bufMedal1,
         fileName: `${p.name}_A01.Replay.gbx`,
       });
+
+      if (medal2) {
+        const bufMedal2 = buildSampleReplayGbx({
+          mapUid: medal2.uid,
+          bestTimeMs: medal2.author_ms + (p.pool - 1) * 700,
+          playerLogin: p.name.toLowerCase(),
+          playerNickname: p.name,
+          nonce: `medal2_${p.id}`,
+        });
+        submitTmnfReplay(db, {
+          userId: p.id,
+          buffer: bufMedal2,
+          fileName: `${p.name}_A02.Replay.gbx`,
+        });
+      }
+
+      if (weeklyMap && currentSettings.tmnf_weekly_unlocked) {
+        const bufWeekly = buildSampleReplayGbx({
+          mapUid: weeklyMap.uid,
+          bestTimeMs: p.tmMs,
+          playerLogin: p.name.toLowerCase(),
+          playerNickname: p.name,
+          nonce: `weekly_${p.id}`,
+        });
+        submitTmnfReplay(db, {
+          userId: p.id,
+          buffer: bufWeekly,
+          fileName: `${p.name}_weekly.Replay.gbx`,
+        });
+      }
     }
   }
 

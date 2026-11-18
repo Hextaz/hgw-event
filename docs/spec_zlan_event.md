@@ -1,4 +1,4 @@
-# Spécification V1.2 — Hextaz Games Week (HGW)
+# Spécification V1.3 — Hextaz Games Week (HGW — Format 2 Semaines)
 
 > **Document de cadrage complet (Site Event + Bot + Infra + Catalogue de Quêtes)**
 > Nom officiel : **Hextaz Games Week (HGW)** — Sous-domaine cible : `hgw.hextaz.dev`
@@ -7,17 +7,20 @@
 
 ## 0. Résumé exécutif
 
-Event communautaire Discord sur **1 semaine** : défis asynchrones toute la semaine (Trackmania permanent + défis quotidiens personnalisés sur une douzaine de jeux) et **events live le week-end** (tournois Brawlhalla, Rocket League Rumble, Fall Guys + Cup Trackmania live).
+Event communautaire Discord sur **2 semaines (Acte I + Acte II + Dernier Week-end Live)** :
+- **Semaine 1 (Acte I — J1 à J7) :** Défis quotidiens personnalisés S1 (`4 défis max/jeu`) + **Chasse aux 8 Maps Médailles Solo Trackmania (`240 pts` max)**.
+- **Semaine 2 (Acte II — J8 à J12) :** Reset automatique du quota hebdomadaire (`4 nouveaux défis max/jeu`) + **Déblocage de 11 nouveaux défis [Acte II]** + **🔓 Déblocage de la Map Serveur 24/7 Trackmania (`150 pts` au 1er)**.
+- **Dernier Week-end (Finale — J13 & J14) :** Les 4 grands tournois Live (Brawlhalla, Cup Trackmania Live, Rocket League Rumble, Fall Guys 5-Show) + Grande Tombola ($\ge 300\text{ pts}$).
 
-Un **site event dédié (`hgw.hextaz.dev`)** centralise profils Discord, inscriptions aux tournois, tirage d'équipes équilibrées par chapeaux (pools de niveau), défis quotidiens, preuves, classement et points — c'est la **seule source de vérité des points**. **TournamentHub** (existant, VM100) gère les arbres (brackets) des tournois live. Gains : carte cadeau 10€, Discord Nitro, sub Twitch + tombola.
+Un **site event dédié (`hgw.hextaz.dev`)** centralise profils Discord, inscriptions aux tournois, tirage d'équipes équilibrées par chapeaux (pools de niveau), défis quotidiens, paliers de régularité, preuves, classement et points — c'est la **seule source de vérité des points**. **TournamentHub** (existant, VM100) gère les arbres (brackets) des tournois live. Gains : carte cadeau 10€, Discord Nitro, sub Twitch + tombola.
 
 ---
 
 ## 1. Contexte & objectifs
 
 - Communauté Discord (~8–24 joueurs).
-- Objectifs : engagement sur toute la semaine (pas uniquement le week-end), variété multi-jeux, équipes équilibrées, récompenses accessibles et motivantes.
-- L'event est conçu pour des personnes en emploi ou en études : **tout l'async est à rythme libre** (défis réalisables en 15–35 min), seuls les events live du week-end ont des créneaux fixes.
+- Objectifs : engagement sur toute la quinzaine en récompensant la **régularité** sans imposer de grind excessif, déblocage progressif (Acte I $\rightarrow$ Acte II), variété multi-jeux, équipes équilibrées, récompenses accessibles et motivantes.
+- L'event est conçu pour des personnes en emploi ou en études : **tout l'async est à rythme libre** (défis réalisables en 15–35 min), seuls les events live du dernier week-end ont des créneaux fixes.
 
 ---
 
@@ -25,16 +28,16 @@ Un **site event dédié (`hgw.hextaz.dev`)** centralise profils Discord, inscrip
 
 | # | Décision |
 |---|---|
-| **D1** | **3 couches de défis** : permanent global (TMNF), quotidien personnalisé (reset 3h00), live week-end (tournois). Chaque source de points est taguée `async` ou `live`. |
+| **D1** | **Phasage sur 2 semaines** : Semaine 1 (8 Maps Médailles Solo TMNF + Quêtes S1), Semaine 2 (Ouverture Map Serveur 24/7 TMNF + Quêtes Acte II + Reset quota par jeu), Dernier Week-end (4 Tournois Live). Chaque source de points est taguée `async` ou `live`. |
 | **D2** | **TournamentHub = gestionnaire de brackets uniquement**. L'inscription aux tournois et la répartition par **pools de niveau (Chapeaux 1 / 2 / 3)** pour équilibrer les équipes se font directement sur le site HGW. |
 | **D3** | **Site HGW = app séparée**, seule source de vérité des points (`points_ledger`). |
 | **D4** | Site hébergé sur **VM100** dans un compose dédié (`/opt/homelab/hgw-event`), bind **127.0.0.1:3000 uniquement**. L'exposition publique HTTP (`cloudflared` sur `hgw.hextaz.dev`) est opérée par l'utilisateur — l'assistant ne crée aucune exposition publique. |
 | **D5** | **Un seul conteneur applicatif Node.js** (Express + Bot `discord.js` + `node-cron` + SQLite en mode WAL) pour éviter tout conflit de verrouillage SQLite et permettre les interactions directes Web ↔ Bot Discord. |
 | **D6** | **Trackmania Nations Forever (TMNF, gratuit)** sur LXC dédié (`pve`). Exposition du serveur via **`playit.gg`** (agent installé dans le LXC qui crée un tunnel public TCP+UDP vers le port `2350` sans ouvrir de port sur la box et sans obliger les joueurs à installer Tailscale). |
 | **D7** | **Fall Guys** : lobby privé par code (si ≥ 8 joueurs présents, sinon escouades en public), **5 parties (Shows) complètes** (~45–50 min au total), points cumulés sur les 5 parties → classement général du tournoi. |
-| **D8** | **Rocket League : Rumble uniquement**, samedi soir après la Cup TM. Équipes tirées au sort **samedi à 21h30 parmi les joueurs présents (check-in)** via le système de **pools d'équilibrage (Chapeau 1 / 2 / 3)**. |
+| **D8** | **Rocket League : Rumble uniquement**, dernier samedi soir après la Cup TM. Équipes tirées au sort **samedi à 21h30 parmi les joueurs présents (check-in)** via le système de **pools d'équilibrage (Chapeau 1 / 2 / 3)**. |
 | **D9** | **Lots (~20–25€, achetés avant l'event)** : 1er = carte cadeau 10€ au choix, 2e = Discord Nitro, 3e = sub Twitch, tombola (seuil ≥ 300 pts), lots fun gratuits. |
-| **D10** | **Défis quotidiens** : **minimum 4 jeux cochés** par joueur (plus une catégorie « Fil Rouge / Web Gratuit » incluse d'office). **3 défis random/jour** tirés à 3h00 (et immédiatement à la 1re inscription), cap de **5 défis max par jeu et par semaine** filtré dès le tirage. |
+| **D10** | **Défis quotidiens & Régularité** : **minimum 4 jeux cochés** par joueur (+ catégorie « Fil Rouge / Web Gratuit » incluse d'office). **3 défis stratifiés/jour** (`10 + 15 + 25 = 50 pts/j`), cap de **4 défis max par jeu et par semaine** (soit `8 défis/jeu` sur les 2 semaines avec reset le lundi S2), et **Bonus de Régularité** automatique (`+20 pts` à 4j actifs, `+40 pts` à 8j, `+60 pts` à 12j = `+120 pts` max). |
 
 ---
 
@@ -71,7 +74,7 @@ flowchart TD
 ### 4.1 Authentification & Profil
 - OAuth2 Discord (scope `identify`), cookie de session signé (`SESSION_SECRET`).
 - **Sélection des jeux quotidiens :** L'utilisateur coche ses jeux parmi le catalogue (**minimum 4 jeux requis**). La catégorie *« Fil Rouge / Web Gratuit »* est activée d'office pour tout le monde.
-- **Inscriptions aux tournois :** Le joueur coche sur le site les tournois du week-end auxquels il s'inscrit (*Brawlhalla*, *Cup TMNF*, *RL Rumble*, *Fall Guys*).
+- **Inscriptions aux tournois :** Le joueur coche sur le site les tournois du dernier week-end auxquels il s'inscrit (*Brawlhalla*, *Cup TMNF*, *RL Rumble*, *Fall Guys*).
 
 ### 4.2 Système de Pools (Chapeaux) & Tirage d'équipes équilibré
 1. **Attribution des Pools (Admin) :** Sur la page admin des tournois, l'organisateur classe chaque inscrit dans l'un des **3 chapeaux de niveau** :
@@ -84,14 +87,15 @@ flowchart TD
    - En **2v2** : chaque équipe associe un joueur **Pool 1** avec un joueur **Pool 2/3**.
    - Une page d'animation du tirage permet de révéler les équipes en direct pendant le stream, puis de les envoyer dans Discord en 1 clic.
 
-### 4.3 Algorithme des défis quotidiens
+### 4.3 Algorithme des défis quotidiens (2 Semaines & Régularité)
 - Exécuté par `node-cron` à `0 3 * * *` (`Europe/Paris`) **et immédiatement à la 1re sauvegarde des jeux d'un nouvel inscrit**.
 - À 3h00, les défis de la veille encore `open` passent en `expired` (les défis `submitted` restent en attente de validation).
 - Pour chaque joueur :
-  1. `games_eligibles` = jeux cochés par le joueur (+ *Fil Rouge*) ayant **strictement moins de 5 défis** (`validated + submitted`) sur la semaine.
-  2. `pool` = quêtes actives de `games_eligibles` non encore tirées pour ce joueur cette semaine.
-  3. Tirer **3 quêtes distinctes** (de préférence sur 3 jeux différents, max 2 du même jeu).
+  1. `games_eligibles` = jeux cochés par le joueur (+ *Fil Rouge*) ayant **strictement moins de 4 défis** (`validated + submitted`) sur la semaine ISO en cours (`week_key`). Le compteur repart automatiquement à 0 le lundi de la Semaine 2.
+  2. `pool` = quêtes actives de `games_eligibles` avec `unlock_week <= current_week` non encore tirées pour ce joueur.
+  3. Tirer **3 quêtes stratifiées** (1 Facile `10 pts`, 1 Moyen `15 pts`, 1 Difficile `25 pts` = `50 pts/jour`).
   4. Créer les 3 lignes dans `daily_assignments` (`status = 'open'`).
+  5. À chaque validation de défi, recalculer le nombre de jours distincts validés (`COUNT(DISTINCT day_key)`) et créditer automatiquement les paliers de **Régularité** (`4j = +20 pts`, `8j = +40 pts`, `12j = +60 pts`).
 
 ### 4.4 Preuves, Parsing `.Replay.gbx` & Validation par boutons Discord
 - **Preuve standard (Image ou Clip) :**
@@ -99,8 +103,8 @@ flowchart TD
   - Le bot poste immédiatement un embed dans `#preuves` avec deux boutons : `[ ✅ Valider (+XX pts) ]` et `[ ❌ Refuser ]`.
   - Un clic d'un admin sur Discord crédite `points_ledger` et met à jour le message en temps réel.
 - **Preuve Trackmania (`.Replay.gbx`) :**
-  - Le joueur dépose son fichier `.Replay.gbx` sur le site.
-  - Le backend parse le bloc XML `<header>` du fichier `.gbx`, vérifie l'UID de la map et le chrono (`<times best="..."/>`), et valide la médaille correspondante.
+  - Le joueur dépose un ou plusieurs fichiers `.Replay.gbx` en lot sur le site.
+  - Le backend parse le bloc XML `<header>` du fichier `.gbx`, vérifie l'UID de la map et le chrono (`<times best="..."/>`), bloque la Map Serveur en Semaine 1 (`effective_phase === 'week1'`), et valide la médaille correspondante.
 
 ---
 
@@ -112,23 +116,25 @@ flowchart TD
   - Installation du paquet officiel `playit` dans le LXC.
   - Création d'un tunnel **Custom TCP + UDP** pointant vers `127.0.0.1:2350`.
   - Les joueurs rejoignent soit via la liste des serveurs, soit en cliquant sur le bouton **`tmtp://#join=...`** affiché sur `hgw.hextaz.dev`, sans installer aucun VPN.
-- **Modes de jeu :**
-  - **Lundi → Samedi 20h30 :** `TimeAttack` sur la map perso (top 10 hebdo).
-  - **Samedi 21h00–21h30 :** `Rounds` / `Cup` (limité à **12 courses max** pour tenir pile en 25–30 minutes avant Rocket League).
+- **Modes de jeu (Phasage 2 Semaines) :**
+  - **Semaine 1 (J1 → J7) :** Chasse aux **8 Maps Médailles Solo** (`240 pts` max).
+  - **Semaine 2 (J8 → Samedi J13 20h30) :** Ouverture du `TimeAttack` 24/7 sur la **Map Serveur HGW** (Top 10 récompensé, `150 pts` au 1er).
+  - **Dernier Samedi (J13) 21h00–21h30 :** `Rounds` / `Cup` Live (limité à **12 courses max** pour tenir pile en 25–30 minutes avant Rocket League).
 
 ---
 
-## 6. Barème de points (50% Async / 50% Live)
+## 6. Barème de points (Équilibré 2 Semaines Async / Finale Live)
 
 | Source | Catégorie | Détail | Points | Max théorique |
 |---|---|---|---|---|
-| **RL Rumble** (Tournoi majeur) | `live` | 1er / 2e / 3e–4e / 5e–8e / Participation | **300 / 200 / 130 / 70 / 40** | 300 pts |
-| **Brawlhalla** | `live` | 1er / 2e / 3e–4e / 5e–8e / Participation | **200 / 140 / 90 / 50 / 25** | 200 pts |
-| **Fall Guys** (Cumul des 5 parties) | `live` | 1er / 2e / 3e–4e / 5e–8e / 9e+ | **200 / 140 / 90 / 50 / 25** | 200 pts |
-| **Cup TMNF Live** (Samedi 21h) | `live` | 1er / 2e / 3e / 4e–6e / Participation | **150 / 100 / 70 / 40 / 20** | 150 pts |
-| **TMNF Map Perso** (Top 10 Semaine) | `async` | 1er / 2e / 3e / 4e–6e / 7e–10e | **150 / 110 / 80 / 50 / 30** | 150 pts |
-| **TMNF Médailles** (8 maps, non-cumulatif) | `async` | Auteur (30) / Or (20) / Argent (10) / Bronze (5) | **jusqu'à 30 pts / map** | 240 pts |
-| **Défis quotidiens** (3/jour, cap 5/jeu) | `async` | Facile (15) / Moyen (25) / Difficile (40) | **15 à 40 pts / défi** | ~450–550 pts |
+| **RL Rumble** (Tournoi majeur — J13) | `live` | 1er / 2e / 3e–4e / 5e–8e / Participation | **300 / 200 / 130 / 70 / 40** | 300 pts |
+| **Brawlhalla** (J13) | `live` | 1er / 2e / 3e–4e / 5e–8e / Participation | **200 / 140 / 90 / 50 / 25** | 200 pts |
+| **Fall Guys** (Cumul des 5 parties — J14) | `live` | 1er / 2e / 3e–4e / 5e–8e / 9e+ | **200 / 140 / 90 / 50 / 25** | 200 pts |
+| **Cup TMNF Live** (Samedi J13 21h) | `live` | 1er / 2e / 3e / 4e–6e / Participation | **150 / 100 / 70 / 40 / 20** | 150 pts |
+| **TMNF Map Serveur 24/7** (Débloquée en S2) | `async` | 1er / 2e / 3e / 4e–6e / 7e–10e | **150 / 110 / 80 / 50 / 30** | 150 pts |
+| **TMNF Médailles** (8 maps dès la S1, non-cumulatif) | `async` | Auteur (30) / Or (20) / Argent (10) / Bronze (5) | **jusqu'à 30 pts / map** | 240 pts |
+| **Défis quotidiens** (3/jour, cap 4/jeu/semaine) | `async` | Facile (10) / Moyen (15) / Difficile (25) | **50 pts / jour** | 600 pts (12j) |
+| **Bonus de Régularité** (Assiduité sur 12j) | `async` | 4j actifs (+20) / 8j actifs (+40) / 12j actifs (+60) | **Paliers cumulables** | +120 pts |
 
 - **Sous-barème interne Fall Guys (5 parties en lobby privé) :**
   - Couronne (Top 1 de la partie) = **10 pts** | Finaliste = **6 pts** | Qualifié Manche 1 = **3 pts** | Éliminé Manche 1 = **1 pt**.

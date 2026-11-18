@@ -76,10 +76,12 @@ function renderAll() {
 
   const phaseMap = {
     registration: '⏳ Inscriptions Ouvertes',
-    live: '🟢 EN COURS (Semaine & Tournois)',
+    week1: '🌱 SEMAINE 1 — Acte I (8 Maps Solo & Défis S1)',
+    week2: '🔥 SEMAINE 2 — Acte II (Serveur 24/7 Débloqué & Finale)',
+    live: '🔥 SEMAINE 2 — Acte II (Serveur 24/7 Débloqué & Finale)',
     closed: '🏁 Événement Clôturé',
   };
-  const phaseLabel = phaseMap[appState.eventSettings?.effective_phase] || '🟢 EN COURS';
+  const phaseLabel = phaseMap[appState.eventSettings?.effective_phase] || '🌱 SEMAINE 1';
   document.getElementById('cycle-indicator').textContent = `${phaseLabel} • Cycle ${appState.dayKey}`;
 
   const adminTab = document.getElementById('tab-admin');
@@ -93,6 +95,7 @@ function renderAll() {
 
   renderAuthZone();
   renderPersonalStatusBar();
+  renderTwoWeekTimeline();
   renderPodium();
   renderLeaderboardAndFeed();
   renderQuestsAndGames();
@@ -101,6 +104,54 @@ function renderAll() {
   if (appState.user?.is_admin === 1) {
     renderAdmin();
   }
+}
+
+function renderTwoWeekTimeline() {
+  const container = document.getElementById('two-week-timeline-bar');
+  if (!container) return;
+  const phase = appState.eventSettings?.effective_phase || 'week1';
+  const isW1 = phase === 'week1';
+  const isW2 = phase === 'week2' || phase === 'live';
+
+  const cardStyle = (active, done) => `
+    background: ${active ? 'linear-gradient(135deg, hsla(43, 96%, 58%, 0.14), var(--bg-surface))' : 'var(--bg-surface)'};
+    border: 1px solid ${active ? 'var(--accent-gold)' : done ? 'hsla(152, 76%, 48%, 0.4)' : 'var(--border-subtle)'};
+    border-radius: var(--radius-md);
+    padding: 0.85rem 1rem;
+    box-shadow: ${active ? 'var(--shadow-glow-gold)' : 'none'};
+  `;
+
+  container.innerHTML = `
+    <div style="${cardStyle(isW1, isW2 || phase === 'closed')}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">
+        <strong style="font-family:var(--font-display);font-size:0.95rem;">🌱 Semaine 1 — Acte I</strong>
+        <span class="badge ${isW1 ? 'badge-hard' : 'badge-easy'}">${isW1 ? 'EN COURS' : isW2 || phase === 'closed' ? '✓ Complété' : 'À venir'}</span>
+      </div>
+      <div style="font-size:0.8rem;color:var(--text-secondary);">
+        <strong>8 Maps Médailles Solo TMNF</strong> (240 pts max) + Défis Quotidiens Acte I (50 pts/j, 4 défis/jeu).
+      </div>
+    </div>
+
+    <div style="${cardStyle(isW2, phase === 'closed')}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">
+        <strong style="font-family:var(--font-display);font-size:0.95rem;">🔥 Semaine 2 — Acte II</strong>
+        <span class="badge ${isW2 ? 'badge-hard' : 'badge-medium'}">${isW2 ? '🔓 DÉBLOQUÉ !' : '🔒 Déblocage Lundi S2'}</span>
+      </div>
+      <div style="font-size:0.8rem;color:var(--text-secondary);">
+        <strong>🔓 Map Serveur TMNF 24/7</strong> (150 pts au 1er) + <strong>Nouveaux Défis Acte II</strong> + Reset quota 4 défis/jeu !
+      </div>
+    </div>
+
+    <div style="${cardStyle(false, phase === 'closed')}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">
+        <strong style="font-family:var(--font-display);font-size:0.95rem;">🏆 Dernier Week-end — Finale Live</strong>
+        <span class="badge badge-easy">Sam. & Dim. S2</span>
+      </div>
+      <div style="font-size:0.8rem;color:var(--text-secondary);">
+        <strong>4 Grands Tournois en Direct</strong> (Brawlhalla, Cup TM, RL Rumble Chapeaux, Fall Guys) + <strong>Grande Tombola</strong>.
+      </div>
+    </div>
+  `;
 }
 
 function renderAuthZone() {
@@ -151,11 +202,11 @@ function renderPersonalStatusBar() {
       <div style="grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
         <div>
           <strong style="font-family: var(--font-display); font-size: 1.15rem;">
-            🔥 Bienvenue sur la Hextaz Games Week (HGW) !
+            🔥 Bienvenue sur la Hextaz Games Week (Édition 2 Semaines) !
           </strong>
           <p style="font-size: 0.88rem; color: var(--text-secondary); margin-top: 0.15rem;">
-            Connecte-toi avec Discord pour tirer tes <strong>3 défis quotidiens (80 pts/j)</strong>, envoyer tes
-            <code>.Replay.gbx</code> Trackmania et viser le <strong>Ticket Tombola (300 pts)</strong>.
+            Connecte-toi avec Discord pour tirer tes <strong>3 défis quotidiens (50 pts/j + 120 pts de Bonus Régularité)</strong>,
+            chasser les 8 maps médailles en Semaine 1, débloquer le Serveur 24/7 en Semaine 2 et viser la <strong>Tombola (300 pts)</strong>.
           </p>
         </div>
         <button type="button" class="btn btn-primary" id="banner-login-btn">
@@ -175,6 +226,7 @@ function renderPersonalStatusBar() {
     async_points: 0,
     live_points: 0,
     quests_validated: 0,
+    active_days_count: 0,
     tmnf_medals_count: 0,
     tombola_eligible: false,
     tombola_progress_pct: 0,
@@ -183,6 +235,7 @@ function renderPersonalStatusBar() {
   const questsToday = appState.myDailyQuests || [];
   const doneToday = questsToday.filter((q) => q.status === 'validated').length;
   const remainingTombola = Math.max(0, appState.tombolaThreshold - me.total_points);
+  const reg = appState.myRegularity || { activeDaysCount: 0, totalBonusPoints: 0 };
 
   bar.innerHTML = `
     <div>
@@ -200,7 +253,7 @@ function renderPersonalStatusBar() {
     <div class="status-stat">
       <div class="status-stat-label">Points Totaux</div>
       <div class="status-stat-val" style="color: var(--accent-gold)">${me.total_points} pts</div>
-      <div style="font-size: 0.73rem; color: var(--text-muted)">Clique pour voir l'historique</div>
+      <div style="font-size: 0.73rem; color: var(--text-muted)">🔥 Régularité : ${reg.activeDaysCount}/12j (+${reg.totalBonusPoints} pts)</div>
     </div>
 
     <div class="status-stat">
@@ -214,7 +267,7 @@ function renderPersonalStatusBar() {
     </div>
 
     <div class="status-stat">
-      <div class="status-stat-label">Défis du Jour</div>
+      <div class="status-stat-label">Défis du Jour (50 pts)</div>
       <div class="status-stat-val">${doneToday} / ${questsToday.length || 3} validés</div>
       <div style="font-size: 0.73rem; color: var(--text-secondary)">
         ${appState.canRerollToday ? '🎲 1 Reroll dispo' : '✓ Reroll utilisé'}
@@ -225,7 +278,7 @@ function renderPersonalStatusBar() {
       <div class="status-stat-label">Chasse Médailles TMNF</div>
       <div class="status-stat-val">${me.tmnf_medals_count} / 8 pistes</div>
       <div style="font-size: 0.73rem; color: var(--text-secondary)">
-        ${topTm ? `WR Hebdo : ${topTm.formatted_time}` : 'Serveur 24/7'}
+        ${topTm ? `WR S2 : ${topTm.formatted_time}` : appState.eventSettings?.tmnf_weekly_unlocked ? '🔓 Serveur S2 Ouvert' : '🔒 Serveur en Semaine 2'}
       </div>
     </div>
   `;
@@ -546,8 +599,51 @@ function renderQuestsAndGames() {
   const toggleBtn = document.getElementById('toggle-games-drawer-btn');
   const masterySection = document.getElementById('weekly-mastery-section');
   const masteryStrip = document.getElementById('weekly-mastery-strip');
+  const regStrip = document.getElementById('regularity-bonus-strip');
 
   const hasEnoughGames = (appState.mySelectedGames || []).length >= 4;
+  const maxCap = appState.maxWeeklyQuestsPerGame || 4;
+  const reg = appState.myRegularity || {
+    activeDaysCount: 0,
+    totalBonusPoints: 0,
+    tiers: [
+      { days: 4, points: 20, unlocked: false },
+      { days: 8, points: 40, unlocked: false },
+      { days: 12, points: 60, unlocked: false },
+    ],
+  };
+
+  if (regStrip) {
+    regStrip.innerHTML = `
+      <div class="card" style="padding:0.9rem 1.15rem;border:1px solid var(--border-gold);background:linear-gradient(135deg, hsla(43, 96%, 58%, 0.08), var(--bg-surface));">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.75rem;">
+          <div>
+            <div style="font-size:0.75rem;text-transform:uppercase;color:var(--accent-gold);font-weight:700;letter-spacing:0.04em;">
+              🔥 Jauge de Régularité sur 2 Semaines (Assiduité)
+            </div>
+            <div style="font-size:0.86rem;color:var(--text-secondary);margin-top:0.15rem;">
+              Valide au moins <strong>1 défi par jour</strong> pour débloquer jusqu'à <strong>+120 pts bonus</strong> :
+              tu as actuellement <strong class="mono" style="color:var(--text-primary);">${reg.activeDaysCount} jour(s) actif(s)</strong>.
+            </div>
+          </div>
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+            ${(reg.tiers || [])
+              .map(
+                (t) => `
+                <div style="padding:0.4rem 0.75rem;border-radius:var(--radius-sm);border:1px solid ${
+                  t.unlocked ? 'var(--accent-emerald)' : 'var(--border-strong)'
+                };background:${t.unlocked ? 'hsla(152, 76%, 48%, 0.14)' : 'var(--bg-elevated)'};font-size:0.8rem;">
+                  <strong>${t.unlocked ? '✅' : '🔒'} Palier ${t.days}j</strong> :
+                  <span class="mono" style="color:${t.unlocked ? 'var(--accent-emerald)' : 'var(--accent-gold)'};font-weight:700;">+${t.points} pts</span>
+                </div>
+              `
+              )
+              .join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  }
 
   if (appState.user && hasEnoughGames) {
     toggleBtn.style.display = 'inline-flex';
@@ -557,23 +653,24 @@ function renderQuestsAndGames() {
     drawer.style.display = gamesDrawerOpen ? 'block' : 'none';
     masterySection.style.display = 'block';
 
-    // Render mastery strip (X/5 per game)
+    // Render mastery strip (X/4 per game per week, reset on Week 2)
     const counts = appState.myWeeklyGameCounts || {};
     const myGamesObjs = (appState.games || []).filter(
       (g) => g.is_universal || appState.mySelectedGames.includes(g.id)
     );
 
+    const pipIndices = Array.from({ length: maxCap }, (_, idx) => idx);
     masteryStrip.innerHTML = myGamesObjs
       .map((g) => {
-        const cnt = Math.min(5, counts[g.id] || 0);
-        const pipsHtml = [0, 1, 2, 3, 4]
+        const cnt = Math.min(maxCap, counts[g.id] || 0);
+        const pipsHtml = pipIndices
           .map((i) => `<span class="pip ${i < cnt ? 'filled' : ''}"></span>`)
           .join('');
         return `
-          <div class="mastery-chip ${cnt >= 5 ? 'capped' : ''}" title="${cnt}/5 défis validés ou soumis cette semaine sur ${escapeHtml(g.name)}">
+          <div class="mastery-chip ${cnt >= maxCap ? 'capped' : ''}" title="${cnt}/${maxCap} défis validés ou soumis cette semaine sur ${escapeHtml(g.name)} (Reset auto en Semaine 2)">
             <span>${g.emoji} <strong>${escapeHtml(g.short_name)}</strong></span>
             <span class="pips">${pipsHtml}</span>
-            <span class="mono" style="font-size:0.74rem;color:var(--text-secondary);">${cnt}/5</span>
+            <span class="mono" style="font-size:0.74rem;color:var(--text-secondary);">${cnt}/${maxCap}</span>
           </div>
         `;
       })
@@ -589,7 +686,7 @@ function renderQuestsAndGames() {
       <div class="card" style="text-align:center;padding:2rem;">
         <h3 class="card-title" style="margin-bottom:0.5rem;">Connecte-toi pour découvrir tes 3 défis du jour !</h3>
         <p style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:1rem;">
-          Chaque nuit à 03h00, le site tire au sort 1 défi Facile (15 pts), 1 Moyen (25 pts) et 1 Difficile (40 pts) uniquement sur tes jeux cochés.
+          Chaque nuit à 03h00, le site tire au sort 1 défi Facile (10 pts), 1 Moyen (15 pts) et 1 Difficile (25 pts) = 50 pts/jour + Bonus Régularité (+120 pts).
         </p>
         <button type="button" class="btn btn-primary" id="quests-login-btn">🎮 Se connecter</button>
       </div>
@@ -660,7 +757,7 @@ function renderQuestsAndGames() {
                 <div>
                   <div class="card-header">
                     <span style="font-size:0.84rem;font-weight:700;color:var(--text-secondary);">
-                      ${q.game_emoji} ${escapeHtml(q.game_name)} <span class="mono" style="font-size:0.72rem;color:var(--text-muted);">(${gameWeekCnt}/5 sem.)</span>
+                      ${q.game_emoji} ${escapeHtml(q.game_name)} <span class="mono" style="font-size:0.72rem;color:var(--text-muted);">(${gameWeekCnt}/${maxCap} sem.)</span>
                     </span>
                     ${diffBadge}
                   </div>
@@ -753,6 +850,38 @@ function renderTrackmania() {
     document.getElementById('tmnf-join-link').href = appState.tmnfServer.joinUrl;
   }
 
+  const phase = appState.eventSettings?.effective_phase || 'week1';
+  const serverUnlocked = Boolean(appState.eventSettings?.tmnf_weekly_unlocked);
+  const w2Banner = document.getElementById('tmnf-server-week2-banner');
+  const w2Badge = document.getElementById('tmnf-server-phase-badge');
+
+  if (w2Badge) {
+    w2Badge.className = `badge ${serverUnlocked ? 'badge-easy' : 'badge-medium'}`;
+    w2Badge.textContent = serverUnlocked ? '🔓 SEMAINE 2 OUVERTE • 150 pts' : '🔒 Déblocage en Semaine 2';
+  }
+
+  if (w2Banner) {
+    if (serverUnlocked) {
+      w2Banner.innerHTML = `
+        <div style="padding:0.65rem 0.9rem;border-radius:var(--radius-sm);background:hsla(152, 76%, 48%, 0.12);border:1px solid hsla(152, 76%, 48%, 0.45);font-size:0.83rem;color:var(--accent-emerald);">
+          🔓 <strong>Acte II (Semaine 2) actif :</strong> La Map Finale du Serveur 24/7 est ouverte ! Tes chronos sur le serveur ou via <code>.Replay.gbx</code> comptent pour le Top 10 (150 pts au 1er).
+        </div>
+      `;
+    } else if (phase === 'closed') {
+      w2Banner.innerHTML = `
+        <div style="padding:0.65rem 0.9rem;border-radius:var(--radius-sm);background:hsla(0, 84%, 60%, 0.12);border:1px solid hsla(0, 84%, 60%, 0.4);font-size:0.83rem;">
+          🏁 <strong>Chrono Serveur clôturé :</strong> Les résultats du Top 10 sont verrouillés.
+        </div>
+      `;
+    } else {
+      w2Banner.innerHTML = `
+        <div style="padding:0.65rem 0.9rem;border-radius:var(--radius-sm);background:hsla(43, 96%, 58%, 0.12);border:1px solid var(--border-gold);font-size:0.83rem;color:var(--accent-gold);">
+          🔒 <strong>Verrouillé pendant la Semaine 1 (Acte I) :</strong> La Map Serveur 24/7 se débloque automatiquement au lancement de la <strong>Semaine 2</strong> (${escapeHtml((appState.eventSettings?.week2_start_at || '').replace('T', ' '))}) ! En attendant, chasse les <strong>8 Maps Médailles Solo</strong> ci-dessous.
+        </div>
+      `;
+    }
+  }
+
   const loginInput = document.getElementById('tmnf-login-input');
   if (loginInput && appState.user?.tmnf_login && !loginInput.value) {
     loginInput.value = appState.user.tmnf_login;
@@ -765,7 +894,7 @@ function renderTrackmania() {
     weeklyTbody.innerHTML = `
       <tr>
         <td colspan="4" style="text-align:center;color:var(--text-muted);padding:1.25rem;">
-          Aucun temps enregistré sur la map de la semaine.
+          ${serverUnlocked ? 'Aucun temps enregistré sur la map serveur Semaine 2.' : '🔒 Classement ouvert dès le déblocage de la Semaine 2.'}
         </td>
       </tr>
     `;
@@ -1767,6 +1896,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const payload = {
       status_mode: document.getElementById('cfg-status-mode').value,
       start_at: document.getElementById('cfg-start-at').value,
+      week2_start_at: document.getElementById('cfg-week2-start-at')?.value || '',
       tmnf_cutoff_at: document.getElementById('cfg-tmnf-cutoff-at').value,
       end_at: document.getElementById('cfg-end-at').value,
       tmnf_playit_address: document.getElementById('cfg-playit-addr').value.trim(),
@@ -1778,7 +1908,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       body: JSON.stringify(payload),
     });
     if (res.ok) {
-      showToast('📅 Dates et paramètres de la HGW mis à jour en temps réel !');
+      showToast('📅 Dates et phase de la HGW mises à jour en temps réel !');
       await fetchState();
     }
   });
