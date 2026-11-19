@@ -23,6 +23,17 @@ let stageIndex = 0;
 let tombolaSpinning = false;
 let sseConnected = false;
 let fetchTimer = null;
+let adminCatalog = null; // { games, quests, pointsByDifficulty, logoSearchEnabled }
+let catalogStale = true;
+let catalogLoading = false;
+let catGameId = null;
+let catFilter = 'all';
+let catSearch = '';
+let gameEdit = null; // { id|null, logo_url }
+let questEdit = null; // { id|null, difficulty, unlock_week }
+let sgdbType = 'icons';
+let sgdbGameId = null;
+let sgdbTimer = null;
 
 const REPLAYS_PATH = '%USERPROFILE%\\Documents\\TrackMania\\Tracks\\Replays\\Replays';
 const REJECT_REASONS = [
@@ -76,6 +87,11 @@ const ICONS = {
   lock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
   play: '<path d="M6 4l14 8-14 8V4Z"/>',
   zap: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  archive: '<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/>',
+  restore: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+  trash: '<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>',
   medal: '<circle cx="12" cy="15" r="6"/><path d="M8.5 10.5 6 3h4l2 5 2-5h4l-2.5 7.5"/>',
 };
 function icon(name, cls = 'i') {
@@ -156,6 +172,10 @@ function monogram(game, small = false) {
     .join('')
     .slice(0, 2)
     .toUpperCase();
+  const logo = game?.logo_url && /^(https:\/\/|\/uploads\/logos\/)/.test(game.logo_url) ? game.logo_url : null;
+  if (logo) {
+    return `<span class="monogram has-logo ${small ? 'monogram--sm' : ''}" aria-hidden="true"><img src="${esc(logo)}" alt="" loading="lazy" data-fallback="${esc(letters || '?')}" /></span>`;
+  }
   return `<span class="monogram ${small ? 'monogram--sm' : ''}" aria-hidden="true">${esc(letters || '?')}</span>`;
 }
 
@@ -258,6 +278,7 @@ const ROUTES = {
   '/admin/evenement': { view: 'admin', pane: 'evenement' },
   '/admin/tournois': { view: 'admin', pane: 'tournois' },
   '/admin/points': { view: 'admin', pane: 'points' },
+  '/admin/catalogue': { view: 'admin', pane: 'catalogue' },
   '/admin/maintenance': { view: 'admin', pane: 'maintenance' },
 };
 const LEGACY_HASH = { '#classement': '/classement', '#defis': '/', '#trackmania': '/trackmania', '#tournois': '/tournois', '#guide': '/aide', '#admin': '/admin' };
@@ -706,8 +727,13 @@ function renderMyStats() {
   </div>`;
 }
 
+// Un jeu désactivé ou sans défi actif n'est pas proposé : il ferait perdre un emplacement au joueur.
+function selectableGames() {
+  return (appState.games || []).filter((g) => g.is_universal || (g.active !== 0 && g.active_quest_count > 0));
+}
+
 function renderGames() {
-  const games = appState.games || [];
+  const games = selectableGames();
   const cap = appState.maxWeeklyQuestsPerGame || 4;
   const counts = appState.myWeeklyGameCounts || {};
   const act1 = phaseInfo().key === 'act1';
@@ -753,7 +779,7 @@ function bindGames(root) {
     })
   );
   root.querySelector('#save-games')?.addEventListener('click', async (e) => {
-    const n = (appState.games || []).filter((g) => !g.is_universal && selectedGameIds.has(g.id)).length;
+    const n = selectableGames().filter((g) => !g.is_universal && selectedGameIds.has(g.id)).length;
     if (n < 4) return toast({ title: `Coche encore ${4 - n} jeu${4 - n > 1 ? 'x' : ''}`, text: 'Il en faut au moins 4.', type: 'danger' });
     e.currentTarget.disabled = true;
     const { ok, data } = await api('/api/profile/games', { json: { gameIds: Array.from(selectedGameIds) } });
@@ -1129,6 +1155,7 @@ function renderAdmin() {
   const panes = [
     ['/admin', 'moderation', 'shield', 'Modération', pending],
     ['/admin/evenement', 'evenement', 'calendar', 'Événement', 0],
+    ['/admin/catalogue', 'catalogue', 'list', 'Jeux et défis', 0],
     ['/admin/tournois', 'tournois', 'swords', 'Tournois', 0],
     ['/admin/points', 'points', 'gift', 'Points et tombola', 0],
   ];
@@ -1145,6 +1172,7 @@ function renderAdmin() {
   renderManualPoints();
   $('tombola-desc').textContent = `${(appState.leaderboard || []).filter((x) => x.tombola_eligible).length} joueurs qualifiés (300 pts et plus).`;
   $('dev-tools').hidden = !appState.devMode;
+  if (route.pane === 'catalogue') renderCatalog();
 }
 
 function renderKpis() {
@@ -1386,6 +1414,528 @@ function renderAdminTournaments() {
       : `<tr><td colspan="8"><div class="hgw-empty"><strong>Aucun inscrit à Fall Guys</strong></div></td></tr>`;
 }
 
+// ============================================================================
+// ADMIN : CATALOGUE JEUX & DÉFIS
+// ============================================================================
+const DIFF_LABEL = { easy: 'Facile', medium: 'Moyen', hard: 'Difficile' };
+const DIFFS = ['easy', 'medium', 'hard'];
+
+async function loadCatalog() {
+  if (catalogLoading) return;
+  catalogLoading = true;
+  const { ok, data } = await api('/api/admin/catalog');
+  catalogLoading = false;
+  if (!ok) return toastError(data, 'Impossible de charger le catalogue.');
+  adminCatalog = data;
+  catalogStale = false;
+  if (!adminCatalog.games.find((g) => g.id === catGameId)) catGameId = adminCatalog.games[0]?.id || null;
+  if (route.pane === 'catalogue') renderCatalog();
+}
+
+function catGame(id = catGameId) {
+  return adminCatalog?.games.find((g) => g.id === id) || null;
+}
+
+function catQuests(gameId = catGameId) {
+  return (adminCatalog?.quests || []).filter((q) => q.game_id === gameId);
+}
+
+// Nombre de défis actifs tirables par difficulté, en acte I puis en acte II (cumulé).
+function coverage(gameId) {
+  const qs = catQuests(gameId).filter((q) => q.active);
+  const count = (week, d) => qs.filter((q) => q.difficulty === d && q.unlock_week <= week).length;
+  return { 1: DIFFS.map((d) => count(1, d)), 2: DIFFS.map((d) => count(2, d)) };
+}
+
+function hasCoverageHole(g) {
+  if (!g.active) return false;
+  return coverage(g.id)[1].some((n) => n === 0);
+}
+
+function renderCatalog() {
+  if (catalogStale) loadCatalog();
+  if (!adminCatalog) {
+    $('cat-games').innerHTML = `<p class="small muted" style="padding: var(--space-2)">Chargement…</p>`;
+    $('cat-detail').innerHTML = '';
+    return;
+  }
+  const games = adminCatalog.games;
+  const activeCount = games.filter((g) => g.active).length;
+  $('cat-games-desc').textContent = `${activeCount} actif${activeCount > 1 ? 's' : ''} · ${adminCatalog.quests.filter((q) => q.active).length} défis tirables`;
+  $('cat-games').innerHTML = games
+    .map(
+      (g) => `<button type="button" role="option" class="cat-game ${g.active ? '' : 'is-off'}" data-cat-game="${esc(g.id)}" aria-selected="${g.id === catGameId}">
+        ${monogram(g)}
+        <span style="min-width: 0">
+          <span class="cat-game__name">${esc(g.short_name)}</span>
+          <span class="cat-game__meta">${g.active_quest_count} défi${g.active_quest_count > 1 ? 's' : ''} · ${g.is_universal ? 'tous' : `${g.player_count} joueur${g.player_count > 1 ? 's' : ''}`}${g.active ? '' : ' · inactif'}</span>
+        </span>
+        ${hasCoverageHole(g) ? `<span class="cat-game__warn" title="Il manque une difficulté en acte I">${icon('alert')}</span>` : ''}
+      </button>`
+    )
+    .join('');
+  $('cat-games').querySelectorAll('[data-cat-game]').forEach((b) =>
+    b.addEventListener('click', () => {
+      catGameId = b.dataset.catGame;
+      catSearch = '';
+      renderCatalog();
+    })
+  );
+  renderCatalogDetail();
+}
+
+function renderCatalogDetail() {
+  const g = catGame();
+  const box = $('cat-detail');
+  if (!g) {
+    box.innerHTML = emptyCard('Aucun jeu', 'Ajoute un premier jeu pour lui créer des défis.');
+    return;
+  }
+  const cov = coverage(g.id);
+  const pts = adminCatalog.pointsByDifficulty;
+  const all = catQuests(g.id);
+  const n = {
+    all: all.length,
+    w1: all.filter((q) => q.unlock_week === 1 && q.active).length,
+    w2: all.filter((q) => q.unlock_week === 2 && q.active).length,
+    off: all.filter((q) => !q.active).length,
+  };
+  const covRow = (week, label) =>
+    `<span class="coverage__h">${label}</span>${cov[week].map((c) => `<span class="coverage__n ${c === 0 ? 'is-empty' : ''}">${c}</span>`).join('')}`;
+
+  box.innerHTML = `
+    <div class="hgw-card__head">
+      <div class="cat-head">
+        ${monogram(g)}
+        <div>
+          <h2 class="hgw-card__title">${esc(g.name)} ${g.active ? '' : '<span class="hgw-badge hgw-badge--danger">Inactif</span>'} ${g.is_universal ? '<span class="hgw-badge hgw-badge--info">Inclus d’office</span>' : ''}</h2>
+          <p class="hgw-card__desc">${esc(plain(g.platforms) || 'Plateformes non renseignées')}</p>
+        </div>
+      </div>
+      <div class="row">
+        <button type="button" class="hgw-btn hgw-btn--secondary hgw-btn--sm" id="cat-edit-game">${icon('edit')}Modifier le jeu</button>
+        <button type="button" class="hgw-btn hgw-btn--primary hgw-btn--sm" id="cat-add-quest">${icon('plus')}Nouveau défi</button>
+      </div>
+    </div>
+    <div class="coverage" title="Défis actifs pouvant être tirés, par difficulté">
+      <span></span>${DIFFS.map((d) => `<span class="coverage__h">${DIFF_LABEL[d]} · ${pts[d]} pts</span>`).join('')}
+      ${covRow(1, 'Acte I')}
+      ${covRow(2, 'Acte II')}
+    </div>
+    ${g.active && cov[1].some((c) => c === 0) ? `<div class="banner banner--info" style="margin-bottom: var(--space-4)">${icon('alert')}<span>Sans défi dans chaque difficulté, le tirage pioche dans un autre jeu du joueur : prévois au moins un défi facile, moyen et difficile.</span></div>` : ''}
+    <div class="row" style="justify-content: space-between; margin-bottom: var(--space-3)">
+      <div class="hgw-seg" role="group" aria-label="Filtrer les défis" id="cat-filter">
+        ${[
+          ['all', 'Tous', n.all],
+          ['w1', 'Acte I', n.w1],
+          ['w2', 'Acte II', n.w2],
+          ['off', 'Archivés', n.off],
+        ]
+          .map(([k, l, c]) => `<button type="button" data-f="${k}" aria-pressed="${catFilter === k}">${l} <span class="hgw-seg__n">${c}</span></button>`)
+          .join('')}
+      </div>
+      <div class="hgw-search" style="max-width: 260px; flex: 1">
+        ${icon('search')}
+        <label class="hgw-sr" for="cat-search">Rechercher un défi</label>
+        <input id="cat-search" class="hgw-input" placeholder="Rechercher" value="${esc(catSearch)}" autocomplete="off" />
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="hgw-table">
+        <thead><tr><th>Difficulté</th><th>Défi</th><th>Acte</th><th class="r" title="Tirés / validés">Tirés</th><th class="r">Actions</th></tr></thead>
+        <tbody id="cat-quests"></tbody>
+      </table>
+    </div>`;
+
+  box.querySelector('#cat-edit-game').addEventListener('click', () => openGameDialog(g.id));
+  box.querySelector('#cat-add-quest').addEventListener('click', () => openQuestDialog(null));
+  box.querySelectorAll('#cat-filter [data-f]').forEach((b) =>
+    b.addEventListener('click', () => {
+      catFilter = b.dataset.f;
+      renderCatalogDetail();
+    })
+  );
+  box.querySelector('#cat-search').addEventListener('input', (e) => {
+    catSearch = e.target.value;
+    renderCatalogRows();
+  });
+  renderCatalogRows();
+}
+
+function renderCatalogRows() {
+  const tbody = $('cat-quests');
+  if (!tbody) return;
+  const term = catSearch.trim().toLowerCase();
+  const rows = catQuests().filter((q) => {
+    if (catFilter === 'w1' && (q.unlock_week !== 1 || !q.active)) return false;
+    if (catFilter === 'w2' && (q.unlock_week !== 2 || !q.active)) return false;
+    if (catFilter === 'off' && q.active) return false;
+    if (term && !`${q.title} ${q.description}`.toLowerCase().includes(term)) return false;
+    return true;
+  });
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="hgw-empty" style="padding: var(--space-6)"><strong>Aucun défi</strong>${term ? 'Rien ne correspond à ta recherche.' : 'Crée le premier avec « Nouveau défi ».'}</div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows
+    .map(
+      (q) => `<tr data-quest="${esc(q.id)}" class="${q.active ? '' : 'is-archived'}">
+        <td>${diffPips(q.difficulty)}</td>
+        <td><div class="cat-quest-title">${esc(plain(q.title))}</div><div class="cat-quest-desc">${esc(plain(q.description))}</div></td>
+        <td>${q.unlock_week === 2 ? 'II' : 'I'}</td>
+        <td class="r mono" style="white-space: nowrap" title="${q.usage_count} tirages, ${q.validated_count} validés, ${q.rerolled_count} relancés">${q.usage_count}<span class="faint"> / ${q.validated_count}</span></td>
+        <td class="r" style="white-space: nowrap">
+          <button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--icon hgw-btn--sm" data-q-toggle="${esc(q.id)}" aria-label="${q.active ? 'Archiver' : 'Réactiver'}" title="${q.active ? 'Archiver (ne sera plus tiré)' : 'Réactiver'}">${icon(q.active ? 'archive' : 'restore')}</button>
+          ${q.usage_count === 0 ? `<button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--icon hgw-btn--sm" data-q-delete="${esc(q.id)}" aria-label="Supprimer" title="Supprimer définitivement">${icon('trash')}</button>` : ''}
+        </td>
+      </tr>`
+    )
+    .join('');
+  tbody.querySelectorAll('tr[data-quest]').forEach((tr) =>
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      openQuestDialog(tr.dataset.quest);
+    })
+  );
+  tbody.querySelectorAll('[data-q-toggle]').forEach((b) => b.addEventListener('click', () => toggleQuest(b.dataset.qToggle)));
+  tbody.querySelectorAll('[data-q-delete]').forEach((b) => b.addEventListener('click', () => removeQuest(b.dataset.qDelete)));
+}
+
+async function toggleQuest(id, silent = false) {
+  const q = adminCatalog.quests.find((x) => x.id === id);
+  if (!q) return;
+  const { ok, data } = await api(`/api/admin/quests/${encodeURIComponent(id)}`, { method: 'PUT', json: { active: !q.active } });
+  if (!ok) return toastError(data);
+  await loadCatalog();
+  if (!silent) {
+    toast({
+      title: q.active ? 'Défi archivé' : 'Défi réactivé',
+      text: q.active ? `« ${plain(q.title)} » ne sera plus tiré. Les points déjà gagnés sont conservés.` : `« ${plain(q.title)} » peut de nouveau être tiré.`,
+      type: 'success',
+      action: { label: 'Annuler', fn: () => toggleQuest(id, true) },
+    });
+  }
+}
+
+async function removeQuest(id) {
+  const q = adminCatalog.quests.find((x) => x.id === id);
+  if (!q || !confirm(`Supprimer définitivement « ${plain(q.title)} » ?`)) return false;
+  const { ok, data } = await api(`/api/admin/quests/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!ok) {
+    toastError(data);
+    return false;
+  }
+  toast({ title: 'Défi supprimé', type: 'success' });
+  await loadCatalog();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Dialogue « Jeu »
+// ---------------------------------------------------------------------------
+function updateLogoPreview() {
+  const url = $('gf-logo-url').value.trim();
+  $('gf-logo-preview').innerHTML = monogram({ short_name: $('gf-short').value || $('gf-name').value || '?', logo_url: url });
+}
+
+function openGameDialog(id) {
+  const g = id ? catGame(id) : null;
+  gameEdit = { id: g?.id || null, pendingFile: null, pendingImport: null };
+  $('game-dialog-title').textContent = g ? `Modifier ${g.short_name}` : 'Nouveau jeu';
+  $('game-dialog-sub').textContent = g
+    ? `${g.active_quest_count} défis actifs · ${g.player_count} joueurs l’ont coché`
+    : 'Il sera proposé aux joueurs dès qu’il aura au moins un défi actif.';
+  $('gf-name').value = g?.name || '';
+  $('gf-short').value = g?.short_name || '';
+  $('gf-platforms').value = g?.platforms || '';
+  $('gf-logo-url').value = g?.logo_url || '';
+  $('gf-active').checked = g ? Boolean(g.active) : true;
+  $('gf-active').disabled = Boolean(g?.is_universal);
+  $('gf-error').textContent = '';
+  const used = g && (g.usage_count > 0 || g.player_count > 0);
+  $('gf-delete').hidden = !g || Boolean(g.is_universal);
+  $('gf-delete').disabled = Boolean(used);
+  $('gf-delete').title = used ? 'Ce jeu a déjà servi : décoche « Actif » pour le retirer sans perdre l’historique.' : '';
+  // SteamGridDB
+  $('gf-sgdb').hidden = false;
+  $('gf-sgdb-results').innerHTML = adminCatalog.logoSearchEnabled
+    ? ''
+    : `<p class="small faint">Recherche de logos désactivée. Ajoute une clé gratuite <span class="mono">STEAMGRIDDB_API_KEY</span> dans <span class="mono">.env</span> pour chercher un logo par nom.</p>`;
+  $('gf-sgdb-bar').hidden = !adminCatalog.logoSearchEnabled;
+  $('gf-sgdb-q').value = adminCatalog.logoSearchEnabled ? g?.short_name || '' : '';
+  $('gf-sgdb-images').innerHTML = '';
+  sgdbGameId = null;
+  updateLogoPreview();
+  $('game-dialog').showModal();
+  if (adminCatalog.logoSearchEnabled && $('gf-sgdb-q').value) searchLogos();
+  $('gf-name').focus();
+}
+
+async function searchLogos() {
+  const q = $('gf-sgdb-q').value.trim();
+  if (q.length < 2) {
+    $('gf-sgdb-results').innerHTML = '';
+    return;
+  }
+  const { ok, data } = await api(`/api/admin/logo-search?q=${encodeURIComponent(q)}`);
+  if (!ok) {
+    $('gf-sgdb-results').innerHTML = `<p class="small t-danger">${esc(plain(data.error))}</p>`;
+    return;
+  }
+  if (!data.results.length) {
+    $('gf-sgdb-results').innerHTML = `<p class="small faint">Aucun jeu trouvé.</p>`;
+    return;
+  }
+  $('gf-sgdb-results').innerHTML = data.results
+    .map((r) => `<button type="button" class="reason" data-sgdb="${r.id}" aria-pressed="${r.id === sgdbGameId}">${esc(r.name)}${r.year ? ` <span class="faint">${r.year}</span>` : ''}</button>`)
+    .join('');
+  $('gf-sgdb-results').querySelectorAll('[data-sgdb]').forEach((b) =>
+    b.addEventListener('click', () => {
+      sgdbGameId = Number(b.dataset.sgdb);
+      $('gf-sgdb-results').querySelectorAll('[data-sgdb]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      loadLogoImages();
+    })
+  );
+  if (!sgdbGameId) $('gf-sgdb-results').querySelector('[data-sgdb]').click();
+}
+
+async function loadLogoImages() {
+  if (!sgdbGameId) return;
+  $('gf-sgdb-images').innerHTML = `<p class="small faint">Chargement…</p>`;
+  const { ok, data } = await api(`/api/admin/logo-search/${sgdbGameId}/images?type=${sgdbType}`);
+  if (!ok) {
+    $('gf-sgdb-images').innerHTML = `<p class="small t-danger">${esc(plain(data.error))}</p>`;
+    return;
+  }
+  if (!data.images.length) {
+    $('gf-sgdb-images').innerHTML = `<p class="small faint">Aucune image de ce type. Essaie l’autre onglet.</p>`;
+    return;
+  }
+  $('gf-sgdb-images').innerHTML = data.images
+    .map((i) => `<button type="button" data-img="${esc(i.url)}" title="${i.width} × ${i.height}"><img src="${esc(i.thumb)}" alt="" loading="lazy" /></button>`)
+    .join('');
+  $('gf-sgdb-images').querySelectorAll('[data-img]').forEach((b) => b.addEventListener('click', () => pickLogo(b.dataset.img)));
+}
+
+async function pickLogo(url) {
+  if (!gameEdit.id) {
+    // Jeu pas encore créé : l'import se fera à l'enregistrement
+    gameEdit.pendingImport = url;
+    gameEdit.pendingFile = null;
+    $('gf-logo-url').value = url;
+    updateLogoPreview();
+    return;
+  }
+  const { ok, data } = await api(`/api/admin/games/${encodeURIComponent(gameEdit.id)}/logo-import`, { json: { url } });
+  if (!ok) return toastError(data);
+  $('gf-logo-url').value = data.game.logo_url;
+  updateLogoPreview();
+  toast({ title: 'Logo importé', text: 'Hébergé sur le serveur HGW.', type: 'success' });
+  loadCatalog();
+}
+
+async function uploadLogo(gameId, file) {
+  const fd = new FormData();
+  fd.append('logo', file);
+  const { ok, data } = await api(`/api/admin/games/${encodeURIComponent(gameId)}/logo`, { method: 'POST', body: fd });
+  if (!ok) {
+    toastError(data);
+    return null;
+  }
+  return data.game;
+}
+
+async function submitGame(e) {
+  e.preventDefault();
+  $('gf-error').textContent = '';
+  const logo = $('gf-logo-url').value.trim();
+  const pendingLocal = gameEdit.pendingFile || gameEdit.pendingImport;
+  const payload = {
+    name: $('gf-name').value,
+    short_name: $('gf-short').value || $('gf-name').value,
+    platforms: $('gf-platforms').value,
+    active: $('gf-active').checked,
+  };
+  // Une image en attente (nouveau jeu) est envoyée après création ; sinon l'URL saisie fait foi.
+  if (!pendingLocal) payload.logo_url = logo || null;
+  const isNew = !gameEdit.id;
+  const { ok, data } = await api(isNew ? '/api/admin/games' : `/api/admin/games/${encodeURIComponent(gameEdit.id)}`, {
+    method: isNew ? 'POST' : 'PUT',
+    json: payload,
+  });
+  if (!ok) {
+    $('gf-error').textContent = plain(data.error) || 'Enregistrement impossible.';
+    return;
+  }
+  const id = data.game.id;
+  if (gameEdit.pendingFile) await uploadLogo(id, gameEdit.pendingFile);
+  else if (gameEdit.pendingImport) {
+    const r = await api(`/api/admin/games/${encodeURIComponent(id)}/logo-import`, { json: { url: gameEdit.pendingImport } });
+    if (!r.ok) toastError(r.data);
+  }
+  $('game-dialog').close();
+  toast({ title: isNew ? 'Jeu ajouté' : 'Jeu enregistré', text: isNew ? 'Ajoute-lui maintenant des défis.' : '', type: 'success' });
+  catGameId = id;
+  await loadCatalog();
+  fetchState();
+}
+
+// ---------------------------------------------------------------------------
+// Dialogue « Défi »
+// ---------------------------------------------------------------------------
+function renderQuestSegs() {
+  const pts = adminCatalog.pointsByDifficulty;
+  $('qf-diff').innerHTML = DIFFS.map(
+    (d) => `<button type="button" data-d="${d}" aria-pressed="${questEdit.difficulty === d}">${DIFF_LABEL[d]} <span class="hgw-seg__n">${pts[d]} pts</span></button>`
+  ).join('');
+  $('qf-diff').querySelectorAll('[data-d]').forEach((b) =>
+    b.addEventListener('click', () => {
+      questEdit.difficulty = b.dataset.d;
+      renderQuestSegs();
+    })
+  );
+  $('qf-week').querySelectorAll('[data-week]').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.week) === questEdit.unlock_week)));
+}
+
+function openQuestDialog(id) {
+  const q = id ? adminCatalog.quests.find((x) => x.id === id) : null;
+  questEdit = { id: q?.id || null, difficulty: q?.difficulty || 'easy', unlock_week: q?.unlock_week || 1 };
+  $('quest-dialog-title').textContent = q ? 'Modifier le défi' : 'Nouveau défi';
+  $('quest-dialog-sub').textContent = q
+    ? `Tiré ${q.usage_count} fois · validé ${q.validated_count} fois · relancé ${q.rerolled_count} fois`
+    : 'Un objectif clair et vérifiable sur une capture d’écran.';
+  $('qf-game').innerHTML = adminCatalog.games
+    .map((g) => `<option value="${esc(g.id)}">${esc(g.short_name)}${g.active ? '' : ' (inactif)'}</option>`)
+    .join('');
+  $('qf-game').value = q?.game_id || catGameId;
+  $('qf-title').value = q?.title || '';
+  $('qf-desc').value = q?.description || '';
+  $('qf-proof').value = q?.proof_hint || '';
+  $('qf-active').checked = q ? Boolean(q.active) : true;
+  $('qf-error').textContent = '';
+  // Le jeu et la difficulté sont figés une fois le défi validé ou en vérification (barème rétroactif).
+  const locked = Boolean(q && q.validated_count > 0);
+  $('qf-game').disabled = locked;
+  $('qf-diff').classList.toggle('is-disabled', locked);
+  $('qf-delete').hidden = !q;
+  $('qf-delete').disabled = Boolean(q && q.usage_count > 0);
+  $('qf-delete').title = q && q.usage_count > 0 ? 'Déjà tiré : archive-le plutôt (décoche « Actif »).' : '';
+  renderQuestSegs();
+  $('qf-diff').querySelectorAll('button').forEach((b) => (b.disabled = locked));
+  $('quest-dialog').showModal();
+  $('qf-title').focus();
+}
+
+async function submitQuest(e) {
+  e.preventDefault();
+  $('qf-error').textContent = '';
+  const payload = {
+    game_id: $('qf-game').value,
+    title: $('qf-title').value,
+    description: $('qf-desc').value,
+    proof_hint: $('qf-proof').value || undefined,
+    difficulty: questEdit.difficulty,
+    unlock_week: questEdit.unlock_week,
+    active: $('qf-active').checked,
+  };
+  const isNew = !questEdit.id;
+  const { ok, data } = await api(isNew ? '/api/admin/quests' : `/api/admin/quests/${encodeURIComponent(questEdit.id)}`, {
+    method: isNew ? 'POST' : 'PUT',
+    json: payload,
+  });
+  if (!ok) {
+    $('qf-error').textContent = plain(data.error) || 'Enregistrement impossible.';
+    return;
+  }
+  $('quest-dialog').close();
+  toast({ title: isNew ? 'Défi créé' : 'Défi enregistré', type: 'success' });
+  catGameId = data.quest.game_id;
+  if (isNew && catFilter === 'off') catFilter = 'all';
+  await loadCatalog();
+}
+
+function bindCatalog() {
+  $('cat-add-game').addEventListener('click', () => openGameDialog(null));
+  $('game-form').addEventListener('submit', submitGame);
+  $('quest-form').addEventListener('submit', submitQuest);
+  ['gf-logo-url', 'gf-name', 'gf-short'].forEach((id) =>
+    $(id).addEventListener('input', () => {
+      if (id === 'gf-logo-url' && gameEdit) {
+        gameEdit.pendingFile = null;
+        gameEdit.pendingImport = null;
+      }
+      updateLogoPreview();
+    })
+  );
+  $('gf-logo-clear').addEventListener('click', () => {
+    gameEdit.pendingFile = null;
+    gameEdit.pendingImport = null;
+    $('gf-logo-url').value = '';
+    updateLogoPreview();
+  });
+  $('gf-logo-file').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (file.size > 1024 * 1024) return toast({ title: 'Image trop lourde', text: '1 Mo maximum.', type: 'danger' });
+    if (!gameEdit.id) {
+      gameEdit.pendingFile = file;
+      gameEdit.pendingImport = null;
+      $('gf-logo-url').value = '';
+      $('gf-logo-preview').innerHTML = `<span class="monogram has-logo"><img src="${URL.createObjectURL(file)}" alt="" /></span>`;
+      return;
+    }
+    const game = await uploadLogo(gameEdit.id, file);
+    if (!game) return;
+    $('gf-logo-url').value = game.logo_url;
+    updateLogoPreview();
+    toast({ title: 'Logo téléversé', type: 'success' });
+    loadCatalog();
+  });
+  $('gf-delete').addEventListener('click', async () => {
+    const g = catGame(gameEdit?.id);
+    if (!g || !confirm(`Supprimer définitivement ${g.name} et ses ${g.quest_count} défis ?`)) return;
+    const { ok, data } = await api(`/api/admin/games/${encodeURIComponent(g.id)}`, { method: 'DELETE' });
+    if (!ok) {
+      $('gf-error').textContent = plain(data.error);
+      return;
+    }
+    $('game-dialog').close();
+    toast({ title: 'Jeu supprimé', type: 'success' });
+    catGameId = null;
+    await loadCatalog();
+    fetchState();
+  });
+  $('gf-sgdb-q').addEventListener('input', () => {
+    clearTimeout(sgdbTimer);
+    sgdbGameId = null;
+    sgdbTimer = setTimeout(searchLogos, 350);
+  });
+  $('gf-sgdb-q').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      clearTimeout(sgdbTimer);
+      searchLogos();
+    }
+  });
+  $('gf-sgdb-type').querySelectorAll('[data-type]').forEach((b) =>
+    b.addEventListener('click', () => {
+      sgdbType = b.dataset.type;
+      $('gf-sgdb-type').querySelectorAll('[data-type]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      loadLogoImages();
+    })
+  );
+  $('qf-week').querySelectorAll('[data-week]').forEach((b) =>
+    b.addEventListener('click', () => {
+      questEdit.unlock_week = Number(b.dataset.week);
+      renderQuestSegs();
+    })
+  );
+  $('qf-delete').addEventListener('click', async () => {
+    if (questEdit?.id && (await removeQuest(questEdit.id))) $('quest-dialog').close();
+  });
+}
+
 function renderManualPoints() {
   const sel = $('mp-user');
   const users = appState.admin?.allUsers || [];
@@ -1509,6 +2059,7 @@ function connectSse() {
     try {
       const payload = JSON.parse(event.data);
       if (payload.type === 'connected') return;
+      if (payload.type === 'catalog_updated') catalogStale = true;
       if (payload.message) toast({ title: plain(payload.message), type: payload.type === 'points_updated' ? 'points' : 'info' });
       scheduleFetch();
     } catch {
@@ -1549,6 +2100,22 @@ function bindStatic() {
       $('usermenu-btn')?.focus();
     }
   });
+
+  // Logo injoignable : retour au monogramme
+  document.addEventListener(
+    'error',
+    (e) => {
+      const img = e.target;
+      if (img?.tagName === 'IMG' && img.dataset.fallback !== undefined) {
+        const box = img.parentElement;
+        box?.classList.remove('has-logo');
+        img.replaceWith(document.createTextNode(img.dataset.fallback));
+      }
+    },
+    true
+  );
+
+  bindCatalog();
 
   // Fermeture des dialogues
   document.querySelectorAll('dialog').forEach((d) => {

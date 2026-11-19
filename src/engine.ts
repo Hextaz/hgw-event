@@ -69,7 +69,10 @@ export function saveUserSelectedGames(
   now: Date = new Date()
 ): { selectedGames: string[]; assignmentsCreated: number } {
   const validNonUniversal = db
-    .prepare(`SELECT id FROM games WHERE is_universal = 0`)
+    .prepare(
+      `SELECT id FROM games g WHERE is_universal = 0 AND active = 1
+         AND EXISTS (SELECT 1 FROM quests q WHERE q.game_id = g.id AND q.active = 1)`
+    )
     .all() as { id: string }[];
   const validSet = new Set(validNonUniversal.map((g) => g.id));
 
@@ -190,7 +193,7 @@ export function drawDailyQuestsForUser(
     .prepare(
       `SELECT id, game_id, title, description, difficulty, points, COALESCE(unlock_week, 1) AS unlock_week
        FROM quests
-       WHERE active = 1 AND COALESCE(unlock_week, 1) <= ? AND game_id IN (${placeholders})`
+       WHERE active = 1 AND game_id IN (SELECT id FROM games WHERE active = 1) AND COALESCE(unlock_week, 1) <= ? AND game_id IN (${placeholders})`
     )
     .all(currentWeek, ...eligibleGames) as {
     id: string;
@@ -358,7 +361,7 @@ export function rerollDailyAssignment(
   const candidates = db
     .prepare(
       `SELECT * FROM quests
-       WHERE active = 1 AND difficulty = ? AND COALESCE(unlock_week, 1) <= ? AND game_id IN (${placeholders})`
+       WHERE active = 1 AND game_id IN (SELECT id FROM games WHERE active = 1) AND difficulty = ? AND COALESCE(unlock_week, 1) <= ? AND game_id IN (${placeholders})`
     )
     .all(assignment.difficulty, currentWeek, ...gameIds) as any[];
 
