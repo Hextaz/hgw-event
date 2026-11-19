@@ -52,11 +52,26 @@ jobs:
             test ! -d node_modules/tsx
           '
       - name: Boot smoke test (reseau isole, sans token Discord)
+        # Le conteneur tourne en mode web seul (pas de exit) : on le lance en arriere-plan,
+        # on scrute les logs + /api/state avec une deadline, puis docker rm -f (jamais de hang).
         run: |
-          set +e
-          timeout 10 docker run --rm --network none -e PORT=3999 -e HOST=127.0.0.1 hgw-event:check > boot.log 2>&1
-          set -e
-          grep -q "Serveur Web actif" boot.log
+          cid="$(docker run -d --network none -e PORT=3999 -e HOST=127.0.0.1 hgw-event:check)"
+          cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          ok=0
+          for i in $(seq 1 20); do
+            if docker logs "$cid" 2>&1 | grep -q "Serveur Web actif" \
+               && docker exec "$cid" node -e "fetch('http://127.0.0.1:3999/api/state').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ok" != "1" ]]; then
+            docker logs "$cid" || true
+            exit 1
+          fi
+          echo "boot OK : /api/state repond 200"
       - name: Validate compose file
         run: |
           cp .env.example .env
