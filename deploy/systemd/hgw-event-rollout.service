@@ -1,0 +1,15 @@
+[Unit]
+Description=hgw-event prod pull rollout with automatic rollback
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/homelab/hgw-event
+Environment=COMPOSE_PROJECT_NAME=hgw-event
+Environment=HGW_IMAGE=ghcr.io/hextaz/hgw-event:prod
+Environment=READY_URL=http://127.0.0.1:3000/api/state
+Environment=SKIP_IF_UNCHANGED=1
+Environment=REJECTED_STATE_FILE=/var/tmp/hgw-event-prod-rejected-target.state
+ExecStart=/opt/homelab/hgw-event/deploy/rollout.sh

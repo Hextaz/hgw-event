@@ -1,5 +1,9 @@
 services:
   app:
+    # Prod (VM100) : image publiee par la CI sur GHCR, pilotee par le timer hgw-event-rollout
+    # (deploy/rollout.sh). En local sans HGW_IMAGE, `docker compose up -d --build` build et tague
+    # l'image locale `hgw-event-app` comme avant.
+    image: ${HGW_IMAGE:-hgw-event-app}
     build: .
     container_name: hgw-event
     restart: unless-stopped
