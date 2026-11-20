@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/data
+**/.env*
+!**/.env.example
+.git
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.log
+test
+docs
+infra

@@ -50,13 +50,24 @@ L'interface suit le design system HGW v2 (thème sombre unique, or réservé aux
 
 ## 🚀 Déploiement sur `VM100` (`/opt/homelab/hgw-event`)
 
+**Déploiement continu (décision actuelle)** : à chaque merge sur `main`, la CI (`.github/workflows/docker.yml`)
+build l'image, la publie sur GHCR (`ghcr.io/hextaz/hgw-event:sha-<12>` puis tag mutable `:prod`) et le timer
+systemd `hgw-event-rollout.timer` sur VM100 (toutes les 2 min) pull l'image `:prod` et la déploie via
+`deploy/rollout.sh` (readiness `GET /api/state` + rollback auto). Installation initiale :
+
 ```bash
 git clone https://github.com/Hextaz/hgw-event.git /opt/homelab/hgw-event
 cd /opt/homelab/hgw-event
 cp .env.example .env
-# Éditer .env avec vos identifiants Discord OAuth2 / Bot Token / Admin IDs
+# Éditer .env avec vos identifiants Discord OAuth2 / Bot Token / Admin IDs (chmod 600, jamais commité)
+chown -R 1000:1000 data   # le conteneur tourne en user node (uid 1000) et écrit /data
 docker compose up -d --build
+sudo cp deploy/systemd/hgw-event-rollout.service deploy/systemd/hgw-event-rollout.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now hgw-event-rollout.timer
 ```
+
+Mise à jour manuelle (si besoin) : `git pull && docker compose up -d --build`. En local/dev, sans
+`HGW_IMAGE`, `docker compose up -d --build` construit et lance l'image locale `hgw-event-app`.
 
 ## 🏎️ Déploiement du Serveur Trackmania Nations Forever + `playit.gg` (LXC Debian 12 sur `pve`)
 

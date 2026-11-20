@@ -1,0 +1,137 @@
+name: Validate and publish container
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+permissions:
+  contents: read
+concurrency:
+  group: hgw-event-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    name: Validate (tests + build TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  docker:
+    name: Build and verify image
+    needs: [validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image (aucun credential embarque)
+        run: |
+          docker build \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t hgw-event:check .
+      - name: Check image contents and non-root user
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' hgw-event:check)" = node
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' hgw-event:check)" = "${GITHUB_SHA}"
+          docker run --rm --network none --entrypoint sh hgw-event:check -ec '
+            test -f dist/index.js
+            test ! -d src
+            test ! -f .env
+            test ! -d node_modules/typescript
+            test ! -d node_modules/tsx
+          '
+      - name: Boot smoke test (reseau isole, sans token Discord)
+        # Le conteneur tourne en mode web seul (pas de exit) : on le lance en arriere-plan,
+        # on scrute les logs + /api/state avec une deadline, puis docker rm -f (jamais de hang).
+        run: |
+          cid="$(docker run -d --network none -e PORT=3999 -e HOST=127.0.0.1 hgw-event:check)"
+          cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          ok=0
+          for i in $(seq 1 20); do
+            if docker logs "$cid" 2>&1 | grep -q "Serveur Web actif" \
+               && docker exec "$cid" node -e "fetch('http://127.0.0.1:3999/api/state').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ok" != "1" ]]; then
+            docker logs "$cid" || true
+            exit 1
+          fi
+          echo "boot OK : /api/state repond 200"
+      - name: Validate compose file
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          rm -f .env
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish verified image by immutable SHA tag
+        id: publish
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        run: |
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER_LC}/hgw-event"
+          SHA_TAG="sha-${GITHUB_SHA::12}"
+          docker tag hgw-event:check "${IMAGE}:${SHA_TAG}"
+          docker push "${IMAGE}:${SHA_TAG}"
+          DIGEST="$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${SHA_TAG}")"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Published image: \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  promote-tags:
+    name: Promote digest to mutable tag (prod sur main)
+    needs: [docker]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Verify ref still points to current commit (evite d'ecraser un tag avec un digest stale)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF}" --jq '.sha')"
+          if [[ "${CURRENT_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "Ref ${GITHUB_REF} has advanced to ${CURRENT_SHA}; skipping mutable tag promotion."
+            exit 1
+          fi
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote digest to mutable tag
+        env:
+          DIGEST: ${{ needs.docker.outputs.digest }}
+        run: |
+          test -n "${DIGEST}"
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${OWNER_LC}/hgw-event"
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            PROMO_TAG="prod"
+          else
+            PROMO_TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          docker buildx imagetools create -t "${IMAGE}:${PROMO_TAG}" "${IMAGE}@${DIGEST#*@}"
+          echo "Promoted \`${PROMO_TAG}\` to \`${DIGEST}\`." >> "$GITHUB_STEP_SUMMARY"
