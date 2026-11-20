@@ -38,7 +38,12 @@ Conformément aux documents de cadrage ([`docs/spec_zlan_event.md`](docs/spec_zl
 L'interface suit le design system HGW v2 (thème sombre unique, or réservé aux points et à l'action principale, icônes au trait, chiffres en JetBrains Mono). Les tokens et composants `hgw-*` vivent dans `public/styles.css`.
 
 - **Vues routées par URL** : `/` (Aujourd'hui), `/classement`, `/trackmania`, `/tournois`, `/aide`.
-- **Back-office** : `/admin` (modération), `/admin/evenement`, `/admin/tournois`, `/admin/points`, `/admin/maintenance`.
+- **Back-office** : `/admin` (modération), `/admin/evenement`, `/admin/catalogue` (jeux et défis), `/admin/tournois`, `/admin/points`, `/admin/maintenance`.
+- **Catalogue jeux & défis (`/admin/catalogue`)** : création, modification, archivage et suppression des jeux et des défis, avec un tableau de couverture par difficulté et par acte.
+  - Les points suivent la difficulté (10 / 15 / 25) pour garantir les 50 pts/jour du tirage.
+  - Un défi déjà tiré ne se supprime pas : il s'archive (l'historique et les points restent). Un jeu déjà utilisé se désactive.
+  - Le catalogue de `src/seed.ts` n'est appliqué qu'au premier démarrage (`catalog_seeded`) : les modifications faites dans l'admin ne sont plus écrasées au redémarrage.
+  - Logos : URL https, téléversement (PNG/JPEG/WEBP/GIF, 1 Mo, SVG refusé) ou recherche SteamGridDB si `STEAMGRIDDB_API_KEY` est défini. Les images importées sont hébergées dans `data/logos`.
 - **Modération au clavier** : `V` valider, `R` refuser (puis `1`–`5` pour un motif), `→` passer, `Espace` agrandir. Chaque décision peut être annulée pendant 5 s.
 - **Overlay OBS** : `/overlay.html?pos=tr&compact=1`.
 

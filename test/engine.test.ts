@@ -20,6 +20,7 @@ import {
   updateFallGuysScoresAndRankings,
 } from '../src/engine.js';
 import { buildSampleReplayGbx } from '../src/gbx.js';
+import { createGame, createQuest, deleteGame, deleteQuest, listCatalog, normalizeLogoUrl, updateGame, updateQuest } from '../src/catalog.js';
 
 async function runTests() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hgw-test-'));
@@ -333,6 +334,73 @@ async function runTests() {
     /clôturée/,
     'Aucun replay ne peut être soumis lorsque l’événement est clôturé'
   );
+
+  // ==========================================================================
+  // CATALOGUE JEUX & DÉFIS (CRUD admin)
+  // ==========================================================================
+  {
+    // Le catalogue du code n'écrase plus les modifications au redémarrage
+    db.prepare(`UPDATE quests SET title = 'Titre modifié admin' WHERE id = 'wii_easy_1'`).run();
+    db.prepare(`DELETE FROM quests WHERE id = 'splatoon_hard_1'`).run();
+    initDb(tmpDir);
+    const reseeded = db.prepare(`SELECT title FROM quests WHERE id = 'wii_easy_1'`).get() as { title: string };
+    assert.equal(reseeded.title, 'Titre modifié admin', 'Un redémarrage ne doit pas écraser un défi modifié');
+    assert.equal(db.prepare(`SELECT 1 FROM quests WHERE id = 'splatoon_hard_1'`).get(), undefined, 'Un défi supprimé ne doit pas ressusciter');
+
+    // Création d'un jeu + logo
+    assert.throws(() => normalizeLogoUrl('javascript:alert(1)'), /invalide|https/);
+    assert.throws(() => normalizeLogoUrl('http://exemple.fr/logo.png'), /https/);
+    assert.equal(normalizeLogoUrl('/uploads/logos/mk_ab12.png'), '/uploads/logos/mk_ab12.png');
+    const mk = createGame(db, { name: 'Mario Kart 8 Deluxe', short_name: 'Mario Kart', logo_url: 'https://cdn.exemple.fr/mk.png' });
+    assert.equal(mk.id, 'mario_kart');
+    assert.equal(mk.active, 1);
+    const universal = db.prepare(`SELECT sort_order FROM games WHERE is_universal = 1`).get() as { sort_order: number };
+    assert.ok(universal.sort_order > mk.sort_order, 'Le Fil Rouge reste en dernier');
+
+    // Les points suivent la difficulté, quelle que soit la saisie
+    const q1 = createQuest(db, { game_id: 'mario_kart', title: 'Premier tour', description: 'Finir une course 150cc dans le top 3.', difficulty: 'hard', points: 999 } as any);
+    assert.equal(q1.points, 25);
+    assert.throws(() => createQuest(db, { game_id: 'mario_kart', title: 'X', description: 'trop court', difficulty: 'easy' }), /Titre/);
+    assert.throws(() => createQuest(db, { game_id: 'mario_kart', title: 'Valide', description: 'Description valide ok', difficulty: 'ultra' }), /Difficulté/);
+    const q1b = updateQuest(db, q1.id, { difficulty: 'easy', title: 'Premier tour (facile)' });
+    assert.equal(q1b.points, 10);
+
+    // Un défi jamais tiré se supprime ; un défi tiré s'archive seulement
+    const q2 = createQuest(db, { game_id: 'mario_kart', title: 'Jamais tiré', description: 'Ce défi ne sera jamais tiré.', difficulty: 'medium' });
+    deleteQuest(db, q2.id);
+    db.prepare(`INSERT INTO users (id, username, display_name) VALUES ('cat_u', 'cat', 'Cat')`).run();
+    db.prepare(`INSERT INTO daily_assignments (user_id, quest_id, day_key, week_key, status) VALUES ('cat_u', ?, '2026-11-20', '2026-W47', 'validated')`).run(q1.id);
+    assert.throws(() => deleteQuest(db, q1.id), /Archive/);
+    assert.throws(() => updateQuest(db, q1.id, { difficulty: 'hard' }), /difficulté/);
+    assert.equal(updateQuest(db, q1.id, { active: false }).active, 0);
+
+    // Un jeu utilisé ne se supprime pas ; un jeu désactivé n'est plus sélectionnable ni tirable
+    assert.throws(() => deleteGame(db, 'mario_kart'), /Désactive/);
+    assert.throws(() => updateGame(db, 'universal', { active: false }), /Fil Rouge/);
+    assert.throws(() => deleteGame(db, 'universal'), /Fil Rouge/);
+    updateGame(db, 'splatoon', { active: false });
+    assert.throws(
+      () => saveUserSelectedGames(db, 'cat_u', ['splatoon', 'tmnf', 'valorant', 'cod']),
+      /au moins 4 jeux/,
+      'Un jeu désactivé ne compte pas dans la sélection'
+    );
+    saveUserSelectedGames(db, 'cat_u', ['wii_sports', 'tmnf', 'valorant', 'cod']);
+    db.prepare(`INSERT INTO user_games (user_id, game_id) VALUES ('cat_u', 'splatoon')`).run();
+    db.prepare(`DELETE FROM daily_assignments WHERE user_id = 'cat_u'`).run();
+    for (let i = 0; i < 5; i++) {
+      db.prepare(`DELETE FROM daily_assignments WHERE user_id = 'cat_u'`).run();
+      const drawn = drawDailyQuestsForUser(db, 'cat_u');
+      assert.ok(drawn.every((d: any) => d.game_id !== 'splatoon'), 'Un jeu désactivé ne doit plus être tiré');
+    }
+    updateGame(db, 'splatoon', { active: true });
+
+    const fresh = createGame(db, { name: 'Jeu Éphémère' });
+    deleteGame(db, fresh.id);
+    const cat = listCatalog(db);
+    assert.ok(cat.games.some((g: any) => g.id === 'mario_kart' && g.quest_count === 1 && g.active_quest_count === 0));
+    assert.ok(!cat.games.some((g: any) => g.id === fresh.id));
+    console.log('✅ Catalogue jeux & défis : CRUD, archivage et seed non destructif OK');
+  }
 
   console.log('✅ Tous les tests unitaires et d’intégration HGW (V1 + V2 + V3 + Format 2 Semaines) sont passés avec succès !');
 }

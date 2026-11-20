@@ -15,7 +15,7 @@
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/styles.css?v=2.0.0" />
+    <link rel="stylesheet" href="/styles.css?v=2.1.0" />
   </head>
   <body>
     <header class="topbar">
@@ -409,6 +409,24 @@
               </div>
             </div>
 
+            <!-- Jeux & défis -->
+            <div class="admin-pane" id="pane-catalogue">
+              <div class="catalog">
+                <div class="hgw-card catalog__games">
+                  <div class="hgw-card__head">
+                    <div>
+                      <h2 class="hgw-card__title">Jeux</h2>
+                      <p class="hgw-card__desc" id="cat-games-desc"></p>
+                    </div>
+                    <button type="button" class="hgw-btn hgw-btn--secondary hgw-btn--sm" id="cat-add-game"><span data-icon="plus"></span>Jeu</button>
+                  </div>
+                  <div class="catalog__list" id="cat-games" role="listbox" aria-label="Jeux"></div>
+                </div>
+
+                <div class="hgw-card" id="cat-detail"></div>
+              </div>
+            </div>
+
             <!-- Maintenance -->
             <div class="admin-pane" id="pane-maintenance">
               <div class="grid-2">
@@ -568,6 +586,128 @@
       </form>
     </dialog>
 
+    <!-- DIALOGUE : JEU (admin) -->
+    <dialog class="hgw-modal hgw-modal--wide" id="game-dialog" aria-labelledby="game-dialog-title">
+      <form id="game-form" novalidate>
+        <div class="hgw-modal__head">
+          <div>
+            <h2 class="hgw-modal__title" id="game-dialog-title">Jeu</h2>
+            <p class="hgw-card__desc" id="game-dialog-sub"></p>
+          </div>
+          <button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--icon hgw-btn--sm" data-close aria-label="Fermer"><span data-icon="x"></span></button>
+        </div>
+        <div class="hgw-modal__body">
+          <div class="form-grid">
+            <div class="hgw-field">
+              <label class="hgw-field__label" for="gf-name">Nom complet</label>
+              <input id="gf-name" class="hgw-input" maxlength="80" required placeholder="ex. Mario Kart 8 Deluxe" />
+            </div>
+            <div class="hgw-field">
+              <label class="hgw-field__label" for="gf-short">Nom court</label>
+              <input id="gf-short" class="hgw-input" maxlength="30" placeholder="ex. Mario Kart" />
+              <span class="hgw-field__help">Affiché sur les cartes de défi.</span>
+            </div>
+            <div class="hgw-field span-2">
+              <label class="hgw-field__label" for="gf-platforms">Plateformes et modes</label>
+              <input id="gf-platforms" class="hgw-input" maxlength="200" placeholder="ex. Switch (Grand Prix, Course en ligne)" />
+            </div>
+          </div>
+
+          <div class="logo-editor">
+            <div class="logo-editor__preview" id="gf-logo-preview"></div>
+            <div class="stack-sm" style="flex: 1; min-width: 0">
+              <div class="hgw-field">
+                <label class="hgw-field__label" for="gf-logo-url">Logo</label>
+                <input id="gf-logo-url" class="hgw-input hgw-input--mono" placeholder="https://… (PNG, JPEG, WEBP)" />
+                <span class="hgw-field__help">Colle une URL, téléverse une image carrée (1 Mo max) ou cherche sur SteamGridDB.</span>
+              </div>
+              <div class="row">
+                <label class="hgw-btn hgw-btn--secondary hgw-btn--sm" id="gf-logo-upload-btn"><span data-icon="upload"></span>Téléverser<input type="file" id="gf-logo-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden /></label>
+                <button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--sm" id="gf-logo-clear">Retirer le logo</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="hgw-card hgw-card--flat" id="gf-sgdb" style="padding: var(--space-4)">
+            <div class="row" style="flex-wrap: nowrap" id="gf-sgdb-bar">
+              <label class="hgw-sr" for="gf-sgdb-q">Rechercher un logo</label>
+              <input id="gf-sgdb-q" class="hgw-input" placeholder="Rechercher sur SteamGridDB" autocomplete="off" />
+              <div class="hgw-seg" role="group" aria-label="Type d'image" id="gf-sgdb-type">
+                <button type="button" data-type="icons" aria-pressed="true">Icônes</button>
+                <button type="button" data-type="logos" aria-pressed="false">Logos</button>
+              </div>
+            </div>
+            <div class="row" id="gf-sgdb-results"></div>
+            <div class="sgdb-grid" id="gf-sgdb-images"></div>
+          </div>
+
+          <label class="switch switch--ok"><input type="checkbox" id="gf-active" checked />Actif (proposé aux joueurs et au tirage)</label>
+          <p class="hgw-field__help t-danger" id="gf-error" role="alert"></p>
+        </div>
+        <div class="hgw-modal__foot" style="justify-content: space-between">
+          <button type="button" class="hgw-btn hgw-btn--danger hgw-btn--sm" id="gf-delete">Supprimer</button>
+          <div class="row">
+            <button type="button" class="hgw-btn hgw-btn--ghost" data-close>Annuler</button>
+            <button type="submit" class="hgw-btn hgw-btn--primary">Enregistrer</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- DIALOGUE : DÉFI (admin) -->
+    <dialog class="hgw-modal hgw-modal--wide" id="quest-dialog" aria-labelledby="quest-dialog-title">
+      <form id="quest-form" novalidate>
+        <div class="hgw-modal__head">
+          <div>
+            <h2 class="hgw-modal__title" id="quest-dialog-title">Défi</h2>
+            <p class="hgw-card__desc" id="quest-dialog-sub"></p>
+          </div>
+          <button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--icon hgw-btn--sm" data-close aria-label="Fermer"><span data-icon="x"></span></button>
+        </div>
+        <div class="hgw-modal__body">
+          <div class="form-grid">
+            <div class="hgw-field">
+              <label class="hgw-field__label" for="qf-game">Jeu</label>
+              <select id="qf-game" class="hgw-input"></select>
+            </div>
+            <div class="hgw-field">
+              <span class="hgw-field__label" id="qf-week-label">Débloqué à</span>
+              <div class="hgw-seg" role="group" aria-labelledby="qf-week-label" id="qf-week">
+                <button type="button" data-week="1" aria-pressed="true">Acte I</button>
+                <button type="button" data-week="2" aria-pressed="false">Acte II</button>
+              </div>
+            </div>
+            <div class="hgw-field span-2">
+              <span class="hgw-field__label" id="qf-diff-label">Difficulté</span>
+              <div class="hgw-seg" role="group" aria-labelledby="qf-diff-label" id="qf-diff"></div>
+              <span class="hgw-field__help">Les points suivent la difficulté pour garantir 50 pts par jour à chaque joueur.</span>
+            </div>
+            <div class="hgw-field span-2">
+              <label class="hgw-field__label" for="qf-title">Titre</label>
+              <input id="qf-title" class="hgw-input" maxlength="80" required placeholder="ex. Roi du Strike" />
+            </div>
+            <div class="hgw-field span-2">
+              <label class="hgw-field__label" for="qf-desc">Objectif</label>
+              <textarea id="qf-desc" class="hgw-input hgw-textarea" maxlength="500" rows="3" required placeholder="Ce que le joueur doit accomplir, de façon vérifiable."></textarea>
+            </div>
+            <div class="hgw-field span-2">
+              <label class="hgw-field__label" for="qf-proof">Preuve attendue</label>
+              <input id="qf-proof" class="hgw-input" maxlength="200" placeholder="ex. Screenshot de la feuille de score avec 3 strikes consécutifs." />
+            </div>
+          </div>
+          <label class="switch switch--ok"><input type="checkbox" id="qf-active" checked />Actif (peut être tiré)</label>
+          <p class="hgw-field__help t-danger" id="qf-error" role="alert"></p>
+        </div>
+        <div class="hgw-modal__foot" style="justify-content: space-between">
+          <button type="button" class="hgw-btn hgw-btn--danger hgw-btn--sm" id="qf-delete">Supprimer</button>
+          <div class="row">
+            <button type="button" class="hgw-btn hgw-btn--ghost" data-close>Annuler</button>
+            <button type="submit" class="hgw-btn hgw-btn--primary">Enregistrer</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
     <!-- DIALOGUE : AGRANDISSEMENT D'UNE CAPTURE -->
     <dialog class="hgw-modal lightbox" id="lightbox" aria-labelledby="lightbox-cap">
       <div class="hgw-modal__head">
@@ -612,6 +752,6 @@
     </div>
 
     <div class="toasts" id="toasts" aria-live="polite"></div>
-    <script type="module" src="/app.js?v=2.0.0"></script>
+    <script type="module" src="/app.js?v=2.1.0"></script>
   </body>
 </html>

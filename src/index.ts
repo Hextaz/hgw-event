@@ -8,6 +8,7 @@ import cron from 'node-cron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HgwDiscordBot } from './bot.js';
+import { createGame, createQuest, deleteGame, deleteQuest, listCatalog, updateGame, updateQuest } from './catalog.js';
 import { initDb } from './db.js';
 import {
   drawDailyQuestsForUser,
@@ -75,7 +76,8 @@ function broadcastRealtimeEvent(type: string, message?: string, payload?: any): 
   }
 }
 
-const { db, proofsDir, replaysDir } = initDb();
+const { db, proofsDir, replaysDir, logosDir } = initDb();
+const STEAMGRIDDB_API_KEY = process.env.STEAMGRIDDB_API_KEY?.trim() || '';
 const bot = new HgwDiscordBot(db, proofsDir, (msg) => {
   broadcastRealtimeEvent('points_updated', msg);
 });
@@ -88,6 +90,7 @@ app.use(cookieParser());
 // Fichiers statiques et preuves
 const publicDir = path.resolve(__dirname, '../public');
 app.use('/uploads/proofs', express.static(proofsDir));
+app.use('/uploads/logos', express.static(logosDir, { maxAge: '7d', immutable: true }));
 app.use(
   express.static(publicDir, {
     etag: false,
@@ -360,7 +363,12 @@ app.post('/api/auth/logout', (_req, res) => {
 
 app.get('/api/state', (req: AuthedRequest, res) => {
   const { dayKey, weekKey } = getParisDayAndWeekKey();
-  const games = db.prepare(`SELECT * FROM games ORDER BY sort_order ASC`).all();
+  const games = db
+    .prepare(
+      `SELECT g.*, (SELECT COUNT(*) FROM quests q WHERE q.game_id = g.id AND q.active = 1) AS active_quest_count
+       FROM games g ORDER BY g.sort_order ASC`
+    )
+    .all();
   const leaderboard = getGlobalLeaderboard(db);
   const weeklyTmnf = recalculateWeeklyTmnfLeaderboard(db);
 
@@ -1105,6 +1113,215 @@ app.post('/api/admin/tombola/draw', requireAdmin, (_req: AuthedRequest, res) => 
     { winner, candidates: qualified, eligibleCount: qualified.length }
   );
   res.json({ ok: true, winner, candidates: qualified, eligibleCount: qualified.length });
+});
+
+// ============================================================================
+// CATALOGUE JEUX & DÉFIS (CRUD admin + logos)
+// ============================================================================
+
+// Seuls les formats raster sont acceptés : un SVG servi depuis notre domaine pourrait embarquer du script.
+function detectImageExt(buf: Buffer): '.png' | '.jpg' | '.webp' | '.gif' | null {
+  if (buf.length < 12) return null;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+  if (buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') return '.webp';
+  if (buf.subarray(0, 4).toString('ascii') === 'GIF8') return '.gif';
+  return null;
+}
+
+function removeLocalLogo(logoUrl?: string | null): void {
+  if (!logoUrl || !logoUrl.startsWith('/uploads/logos/')) return;
+  const file = path.join(logosDir, path.basename(logoUrl));
+  fs.rm(file, { force: true }, () => {});
+}
+
+function storeLogo(gameId: string, buf: Buffer): string {
+  const ext = detectImageExt(buf);
+  if (!ext) throw new Error('Format non pris en charge : PNG, JPEG, WEBP ou GIF uniquement (pas de SVG).');
+  const name = `${gameId.replace(/[^a-z0-9_-]/gi, '')}_${crypto.randomBytes(4).toString('hex')}${ext}`;
+  fs.writeFileSync(path.join(logosDir, name), buf);
+  return `/uploads/logos/${name}`;
+}
+
+function setGameLogo(gameId: string, buf: Buffer): any {
+  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(gameId) as any;
+  if (!game) throw new Error('Jeu introuvable.');
+  const url = storeLogo(gameId, buf);
+  const updated = updateGame(db, gameId, { logo_url: url });
+  removeLocalLogo(game.logo_url);
+  return updated;
+}
+
+const logoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 } });
+
+function catalogChanged(): void {
+  broadcastRealtimeEvent('catalog_updated');
+}
+
+app.get('/api/admin/catalog', requireAdmin, (_req: AuthedRequest, res) => {
+  res.json({ ...listCatalog(db), logoSearchEnabled: Boolean(STEAMGRIDDB_API_KEY) });
+});
+
+app.post('/api/admin/games', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const game = createGame(db, req.body || {});
+    catalogChanged();
+    res.json({ ok: true, game });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/games/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const id = String(req.params.id);
+    const before = db.prepare(`SELECT logo_url FROM games WHERE id = ?`).get(id) as { logo_url: string | null } | undefined;
+    const game = updateGame(db, id, req.body || {});
+    if (before && before.logo_url !== game.logo_url) removeLocalLogo(before.logo_url);
+    catalogChanged();
+    res.json({ ok: true, game });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/games/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const result = deleteGame(db, String(req.params.id));
+    removeLocalLogo(result.logo_url);
+    catalogChanged();
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(409).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/games/:id/logo', requireAdmin, logoUpload.single('logo'), (req: AuthedRequest, res) => {
+  try {
+    if (!req.file) throw new Error('Aucun fichier reçu.');
+    const game = setGameLogo(String(req.params.id), req.file.buffer);
+    catalogChanged();
+    res.json({ ok: true, game });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Recherche de logos via SteamGridDB (optionnelle : nécessite STEAMGRIDDB_API_KEY)
+async function steamGridDb(pathname: string): Promise<any> {
+  let r: globalThis.Response;
+  try {
+    r = await fetch(`https://www.steamgriddb.com/api/v2${pathname}`, {
+      headers: { Authorization: `Bearer ${STEAMGRIDDB_API_KEY}` },
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    throw new Error('SteamGridDB injoignable depuis le serveur. Colle une URL ou téléverse une image à la place.');
+  }
+  if (r.status === 401 || r.status === 403) throw new Error('Clé SteamGridDB refusée : vérifie STEAMGRIDDB_API_KEY.');
+  if (r.status === 404) return { data: [] };
+  if (!r.ok) throw new Error(`SteamGridDB indisponible (HTTP ${r.status}).`);
+  return r.json();
+}
+
+function requireLogoSearch(_req: Request, res: Response, next: NextFunction): void {
+  if (!STEAMGRIDDB_API_KEY) {
+    res.status(501).json({ error: 'Recherche de logos désactivée : ajoute STEAMGRIDDB_API_KEY dans .env.' });
+    return;
+  }
+  next();
+}
+
+app.get('/api/admin/logo-search', requireAdmin, requireLogoSearch, async (req: AuthedRequest, res) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 80);
+    if (q.length < 2) {
+      res.json({ results: [] });
+      return;
+    }
+    const data = await steamGridDb(`/search/autocomplete/${encodeURIComponent(q)}`);
+    const results = (data.data || []).slice(0, 8).map((g: any) => ({
+      id: g.id,
+      name: g.name,
+      year: g.release_date ? new Date(g.release_date * 1000).getFullYear() : null,
+      verified: Boolean(g.verified),
+    }));
+    res.json({ results });
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/logo-search/:sgdbId/images', requireAdmin, requireLogoSearch, async (req: AuthedRequest, res) => {
+  try {
+    const sgdbId = Number.parseInt(String(req.params.sgdbId), 10);
+    if (!Number.isFinite(sgdbId)) throw new Error('Identifiant invalide.');
+    const type = req.query.type === 'logos' ? 'logos' : 'icons';
+    const data = await steamGridDb(`/${type}/game/${sgdbId}?nsfw=false&humor=false`);
+    const images = (data.data || [])
+      .filter((i: any) => ['image/png', 'image/jpeg', 'image/webp'].includes(i.mime))
+      .slice(0, 24)
+      .map((i: any) => ({ id: i.id, url: i.url, thumb: i.thumb, width: i.width, height: i.height }));
+    res.json({ images });
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Importe une image SteamGridDB et l'héberge localement (pas de hotlink : le logo survit si la source disparaît).
+// Seul le CDN SteamGridDB est autorisé, pour éviter que le serveur aille chercher n'importe quelle URL.
+app.post('/api/admin/games/:id/logo-import', requireAdmin, requireLogoSearch, async (req: AuthedRequest, res) => {
+  try {
+    let url: URL;
+    try {
+      url = new URL(String(req.body?.url || ''));
+    } catch {
+      throw new Error('URL invalide.');
+    }
+    if (url.protocol !== 'https:' || !/(^|\.)steamgriddb\.com$/.test(url.hostname)) {
+      throw new Error('Seules les images du CDN SteamGridDB peuvent être importées.');
+    }
+    const r = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error(`Téléchargement impossible (HTTP ${r.status}).`);
+    if (Number(r.headers.get('content-length') || 0) > 2 * 1024 * 1024) throw new Error('Image trop lourde (2 Mo max).');
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > 2 * 1024 * 1024) throw new Error('Image trop lourde (2 Mo max).');
+    const game = setGameLogo(String(req.params.id), buf);
+    catalogChanged();
+    res.json({ ok: true, game });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/quests', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const quest = createQuest(db, req.body || {});
+    catalogChanged();
+    res.json({ ok: true, quest });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/quests/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const quest = updateQuest(db, String(req.params.id), req.body || {});
+    catalogChanged();
+    res.json({ ok: true, quest });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/quests/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    deleteQuest(db, String(req.params.id));
+    catalogChanged();
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(409).json({ error: err.message });
+  }
 });
 
 // Sauvegarde à chaud de la base SQLite (.sqlite) sans interrompre le serveur

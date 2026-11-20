@@ -1149,14 +1149,21 @@ export function seedDatabase(db: Database.Database): void {
     ['tmnf_server_login', process.env.TMNF_SERVER_LOGIN || 'hgw_stadium_2026'],
   ];
 
+  // Les jeux et défis sont éditables depuis l'admin : le catalogue du code n'est appliqué
+  // qu'une seule fois, sinon chaque redémarrage écraserait (ou ressusciterait) les modifications.
+  const catalogSeeded = db.prepare(`SELECT value FROM event_settings WHERE key = 'catalog_seeded'`).get();
+
   const tx = db.transaction(() => {
-    for (const g of GAMES_CATALOG) upsertGame.run(g);
-    for (const q of QUESTS_CATALOG) {
-      upsertQuest.run({
-        ...q,
-        points: QUEST_POINTS_BY_DIFFICULTY[q.difficulty],
-        unlock_week: q.unlock_week || 1,
-      });
+    if (!catalogSeeded) {
+      for (const g of GAMES_CATALOG) upsertGame.run(g);
+      for (const q of QUESTS_CATALOG) {
+        upsertQuest.run({
+          ...q,
+          points: QUEST_POINTS_BY_DIFFICULTY[q.difficulty],
+          unlock_week: q.unlock_week || 1,
+        });
+      }
+      insertSetting.run('catalog_seeded', new Date().toISOString());
     }
     for (const m of TMNF_MAPS_CATALOG) upsertMap.run(m);
     for (const t of TOURNAMENTS_CATALOG) upsertTournament.run(t);

@@ -8,6 +8,7 @@ export interface DbContext {
   dataDir: string;
   proofsDir: string;
   replaysDir: string;
+  logosDir: string;
 }
 
 let cachedContext: DbContext | null = null;
@@ -21,10 +22,12 @@ export function initDb(customDataDir?: string): DbContext {
   const dbDir = path.join(dataDir, 'db');
   const proofsDir = path.join(dataDir, 'proofs');
   const replaysDir = path.join(dataDir, 'replays');
+  const logosDir = path.join(dataDir, 'logos');
 
   fs.mkdirSync(dbDir, { recursive: true });
   fs.mkdirSync(proofsDir, { recursive: true });
   fs.mkdirSync(replaysDir, { recursive: true });
+  fs.mkdirSync(logosDir, { recursive: true });
 
   const dbPath = path.join(dbDir, 'hgw.sqlite');
   const db = new Database(dbPath);
@@ -198,9 +201,18 @@ export function initDb(customDataDir?: string): DbContext {
     db.exec(`ALTER TABLE quests ADD COLUMN unlock_week INTEGER NOT NULL DEFAULT 1`);
   }
 
+  // Catalogue éditable depuis l'admin : logo et désactivation (sans suppression) d'un jeu
+  const gameCols = db.prepare(`PRAGMA table_info(games)`).all() as { name: string }[];
+  if (!gameCols.some((c) => c.name === 'logo_url')) {
+    db.exec(`ALTER TABLE games ADD COLUMN logo_url TEXT`);
+  }
+  if (!gameCols.some((c) => c.name === 'active')) {
+    db.exec(`ALTER TABLE games ADD COLUMN active INTEGER NOT NULL DEFAULT 1`);
+  }
+
   seedDatabase(db);
 
-  const ctx = { db, dataDir, proofsDir, replaysDir };
+  const ctx = { db, dataDir, proofsDir, replaysDir, logosDir };
   if (!customDataDir) {
     cachedContext = ctx;
   }
