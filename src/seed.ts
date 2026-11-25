@@ -986,6 +986,10 @@ export const TOURNAMENTS_CATALOG = [
     mode_label: 'Bracket Double Élimination (1v1 / 2v2 Équilibré)',
     team_size: 1,
     is_major: 0,
+    scoring_mode: 'direct',
+    rounds_count: 1,
+    round_presets_json: '[]',
+    bracket_url: null,
     points_scale_json: JSON.stringify({
       1: 200,
       2: 140,
@@ -1009,6 +1013,10 @@ export const TOURNAMENTS_CATALOG = [
     mode_label: 'Course en direct sur le serveur HGW (12 manches max, 30 min)',
     team_size: 1,
     is_major: 0,
+    scoring_mode: 'direct',
+    rounds_count: 1,
+    round_presets_json: '[]',
+    bracket_url: null,
     points_scale_json: JSON.stringify({
       1: 150,
       2: 100,
@@ -1030,6 +1038,10 @@ export const TOURNAMENTS_CATALOG = [
     mode_label: 'Tournoi Majeur — Équipes équilibrées par Chapeaux (Pool 1 + 2 + 3)',
     team_size: 3,
     is_major: 1,
+    scoring_mode: 'direct',
+    rounds_count: 1,
+    round_presets_json: '[]',
+    bracket_url: null,
     points_scale_json: JSON.stringify({
       1: 300,
       2: 200,
@@ -1053,6 +1065,15 @@ export const TOURNAMENTS_CATALOG = [
     mode_label: 'Salon privé — Cumul des 5 parties (Couronne=10, Finale=6, Qualif M1=3, Élim=1)',
     team_size: 1,
     is_major: 0,
+    scoring_mode: 'rounds',
+    rounds_count: 5,
+    round_presets_json: JSON.stringify([
+      { label: 'Éliminé', points: 1 },
+      { label: 'Qualifié', points: 3 },
+      { label: 'Finale', points: 6 },
+      { label: 'Couronne', points: 10 },
+    ]),
+    bracket_url: null,
     points_scale_json: JSON.stringify({
       1: 200,
       2: 140,
@@ -1100,35 +1121,21 @@ export function seedDatabase(db: Database.Database): void {
       unlock_week = excluded.unlock_week
   `);
 
-  const upsertMap = db.prepare(`
-    INSERT INTO tmnf_maps (id, code, name, uid, environment, is_weekly, author_ms, gold_ms, silver_ms, bronze_ms, sort_order)
-    VALUES (@id, @code, @name, @uid, @environment, @is_weekly, @author_ms, @gold_ms, @silver_ms, @bronze_ms, @sort_order)
-    ON CONFLICT(id) DO UPDATE SET
-      code = excluded.code,
-      name = excluded.name,
-      environment = excluded.environment,
-      is_weekly = excluded.is_weekly,
-      author_ms = excluded.author_ms,
-      gold_ms = excluded.gold_ms,
-      silver_ms = excluded.silver_ms,
-      bronze_ms = excluded.bronze_ms,
-      sort_order = excluded.sort_order
+  const upsertFeaturedItem = db.prepare(`
+    INSERT INTO featured_items (id, code, name, description, is_ladder, external_uid, thresholds_json, metadata_json, active, sort_order)
+    VALUES (@id, @code, @name, @description, @is_ladder, @external_uid, @thresholds_json, @metadata_json, 1, @sort_order)
+    ON CONFLICT(id) DO NOTHING
   `);
 
   const upsertTournament = db.prepare(`
-    INSERT INTO tournaments (id, name, emoji, game_id, scheduled_label, scheduled_iso, mode_label, team_size, is_major, points_scale_json, sort_order)
-    VALUES (@id, @name, @emoji, @game_id, @scheduled_label, @scheduled_iso, @mode_label, @team_size, @is_major, @points_scale_json, @sort_order)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      emoji = excluded.emoji,
-      game_id = excluded.game_id,
-      scheduled_label = excluded.scheduled_label,
-      scheduled_iso = excluded.scheduled_iso,
-      mode_label = excluded.mode_label,
-      team_size = excluded.team_size,
-      is_major = excluded.is_major,
-      points_scale_json = excluded.points_scale_json,
-      sort_order = excluded.sort_order
+    INSERT INTO tournaments (
+      id, name, emoji, game_id, scheduled_label, scheduled_iso, mode_label, team_size, is_major,
+      scoring_mode, rounds_count, round_presets_json, bracket_url, points_scale_json, active, sort_order
+    ) VALUES (
+      @id, @name, @emoji, @game_id, @scheduled_label, @scheduled_iso, @mode_label, @team_size, @is_major,
+      @scoring_mode, @rounds_count, @round_presets_json, @bracket_url, @points_scale_json, 1, @sort_order
+    )
+    ON CONFLICT(id) DO NOTHING
   `);
 
   const insertSetting = db.prepare(`
@@ -1138,8 +1145,17 @@ export function seedDatabase(db: Database.Database): void {
   `);
 
   const defaultSettings: [string, string][] = [
-    ['event_name', 'Hextaz Games Week (Édition 2 Semaines)'],
-    ['status_mode', 'auto'], // 'auto' | 'registration' | 'week1' | 'week2' | 'live' | 'closed'
+    ['event_name', 'Hextaz Games Week'],
+    ['event_subtitle', 'Deux semaines de défis, de chronos et de tournois live entre amis.'],
+    ['status_mode', 'auto'],
+    ['acts_count', '2'],
+    [
+      'acts_json',
+      JSON.stringify([
+        { index: 1, name: 'Acte I', start_at: '2026-11-16T03:00' },
+        { index: 2, name: 'Acte II', start_at: '2026-11-23T03:00' },
+      ]),
+    ],
     ['start_at', '2026-11-16T03:00'],
     ['week2_start_at', '2026-11-23T03:00'],
     ['tmnf_cutoff_at', '2026-11-28T20:30'],
@@ -1147,11 +1163,28 @@ export function seedDatabase(db: Database.Database): void {
     ['tmnf_playit_address', process.env.TMNF_PLAYIT_ADDRESS || 'hgw-tmnf.playit.gg:2350'],
     ['tmnf_join_url', process.env.TMNF_JOIN_URL || 'tmtp://#join=hgw_stadium_2026'],
     ['tmnf_server_login', process.env.TMNF_SERVER_LOGIN || 'hgw_stadium_2026'],
+    ['prizes_json', JSON.stringify(['Carte cadeau 10 €', 'Discord Nitro', 'Abonnement Twitch'])],
+    ['tombola_prize', 'Lot surprise Tombola'],
+    ['tombola_threshold', '300'],
+    ['min_selected_games', '4'],
+    ['max_quests_per_game_per_act', '4'],
+    ['daily_quests_count', '3'],
+    ['daily_rerolls_max', '1'],
+    ['quest_points_json', JSON.stringify(QUEST_POINTS_BY_DIFFICULTY)],
+    [
+      'regularity_tiers_json',
+      JSON.stringify([
+        { days: 4, points: 20, label: 'Palier Régularité — 4 Jours Actifs' },
+        { days: 8, points: 40, label: 'Palier Régularité — 8 Jours Actifs' },
+        { days: 12, points: 60, label: 'Palier Régularité — 12 Jours Actifs' },
+      ]),
+    ],
   ];
 
-  // Les jeux et défis sont éditables depuis l'admin : le catalogue du code n'est appliqué
-  // qu'une seule fois, sinon chaque redémarrage écraserait (ou ressusciterait) les modifications.
+  // Chaque bloc éditable depuis l'admin n'est seedé qu'une seule fois afin qu'aucun redémarrage n'écrase vos réglages.
   const catalogSeeded = db.prepare(`SELECT value FROM event_settings WHERE key = 'catalog_seeded'`).get();
+  const featuredSeeded = db.prepare(`SELECT value FROM event_settings WHERE key = 'featured_seeded'`).get();
+  const tournamentsSeeded = db.prepare(`SELECT value FROM event_settings WHERE key = 'tournaments_seeded'`).get();
 
   const tx = db.transaction(() => {
     if (!catalogSeeded) {
@@ -1165,10 +1198,37 @@ export function seedDatabase(db: Database.Database): void {
       }
       insertSetting.run('catalog_seeded', new Date().toISOString());
     }
-    for (const m of TMNF_MAPS_CATALOG) upsertMap.run(m);
-    for (const t of TOURNAMENTS_CATALOG) upsertTournament.run(t);
+
+    if (!featuredSeeded) {
+      for (const m of TMNF_MAPS_CATALOG) {
+        upsertFeaturedItem.run({
+          id: m.id,
+          code: m.code,
+          name: m.name,
+          description: '',
+          is_ladder: m.is_weekly ? 1 : 0,
+          external_uid: m.uid,
+          thresholds_json: JSON.stringify({
+            author: m.author_ms,
+            gold: m.gold_ms,
+            silver: m.silver_ms,
+            bronze: m.bronze_ms,
+          }),
+          metadata_json: JSON.stringify({ environment: m.environment || 'Stadium' }),
+          sort_order: m.sort_order,
+        });
+      }
+      insertSetting.run('featured_seeded', new Date().toISOString());
+    }
+
+    if (!tournamentsSeeded) {
+      for (const t of TOURNAMENTS_CATALOG) upsertTournament.run(t);
+      insertSetting.run('tournaments_seeded', new Date().toISOString());
+    }
+
     for (const [k, v] of defaultSettings) insertSetting.run(k, v);
   });
 
   tx();
 }
+
