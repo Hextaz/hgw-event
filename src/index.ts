@@ -8,32 +8,77 @@ import cron from 'node-cron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HgwDiscordBot } from './bot.js';
-import { createGame, createQuest, deleteGame, deleteQuest, listCatalog, updateGame, updateQuest } from './catalog.js';
+import {
+  createGame,
+  createQuest,
+  deleteGame,
+  deleteQuest,
+  exportCatalog,
+  importCatalog,
+  listCatalog,
+  updateGame,
+  updateQuest,
+} from './catalog.js';
+import { getEventConfig, isPlayablePhase, updateEventConfig } from './config.js';
 import { initDb } from './db.js';
 import {
+  archiveCurrentEdition,
+  deleteArchivedEdition,
+  listArchivedEditions,
+  startNewEdition,
+} from './editions.js';
+import {
   drawDailyQuestsForUser,
-  generateBalancedTeams,
-  getEventSettings,
   getGlobalLeaderboard,
-  getMapLeaderboard,
   getParisDayAndWeekKey,
+  getUserActGameCounts,
+  getUserRegularitySummary,
   grantManualPoints,
-  MAX_WEEKLY_QUESTS_PER_GAME,
-  recalculateUserRegularityBonuses,
-  recalculateWeeklyTmnfLeaderboard,
-  recordTmnfLiveServerFinish,
-  recordTournamentPlacements,
+  recalculateAllRegularityBonuses,
   rerollDailyAssignment,
   reviewDailyAssignment,
   runNightlyDailyReset,
   saveUserSelectedGames,
   submitDailyProof,
-  submitTmnfReplay,
-  TOMBOLA_POINTS_THRESHOLD,
-  updateEventSettings,
-  updateFallGuysScoresAndRankings,
+  updateUserTmnfLogin,
 } from './engine.js';
-import { buildSampleReplayGbx, formatTmTime } from './gbx.js';
+import {
+  createFeaturedItem,
+  deleteFeaturedItem,
+  getFeaturedItemLeaderboard,
+  getFeaturedLadder,
+  getUserFeaturedSummary,
+  listFeaturedItems,
+  listPendingFeaturedProofs,
+  recalculateAllFeaturedStages,
+  recalculateFeaturedLadder,
+  recordTmnfLiveServerFinish,
+  reviewFeaturedSubmission,
+  submitFeaturedStandard,
+  submitTmnfReplay,
+  updateFeaturedItem,
+  type UserFeaturedItemSummary,
+} from './featured.js';
+import { buildSampleReplayGbx, parseChallengeGbx } from './gbx.js';
+import {
+  createTournament,
+  deleteTournament,
+  generateBalancedTeams,
+  listTournamentsWithRegistrations,
+  recordTournamentPlacements,
+  updateTournament,
+  updateTournamentPlayer,
+  updateTournamentRoundScores,
+} from './tournaments.js';
+import {
+  errorMessage,
+  type DailyAssignmentDetailRow,
+  type GameRow,
+  type PointsLedgerRow,
+  type RegularitySummary,
+  type TournamentRow,
+  type UserRow,
+} from './types.js';
 
 dotenv.config();
 
@@ -42,18 +87,49 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'hgw-dev-secret-change-in-production-2026';
-const COOKIE_NAME = 'hgw_session';
-
-// Mode démo (connexion de test, joueurs fictifs, replays d'exemple).
-// Fermé par défaut : en production il faut ALLOW_DEV_LOGIN=true explicitement.
-// En local (NODE_ENV ≠ production) il reste actif tant que Discord OAuth n'est pas configuré.
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const ENV_SESSION_SECRET = process.env.SESSION_SECRET?.trim();
+const SESSION_SECRET =
+  ENV_SESSION_SECRET ||
+  (IS_PRODUCTION ? crypto.randomBytes(32).toString('hex') : 'hgw-dev-secret-local-only');
+const COOKIE_NAME = 'hgw_session';
+const SESSION_TTL_MS = 14 * 24 * 3600 * 1000;
+
 const DEV_MODE =
   process.env.ALLOW_DEV_LOGIN === 'true' || (!IS_PRODUCTION && !process.env.DISCORD_CLIENT_ID?.trim());
-if (IS_PRODUCTION && SESSION_SECRET.startsWith('hgw-dev-secret')) {
-  console.warn('⚠️  SESSION_SECRET par défaut utilisé en production : définissez-en un dans .env.');
+if (IS_PRODUCTION && !ENV_SESSION_SECRET) {
+  console.warn(
+    '⚠️  SESSION_SECRET non défini en production : un secret éphémère aléatoire a été généré (les sessions expireront au redémarrage). Définissez SESSION_SECRET dans .env.'
+  );
 }
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+function safeFilename(raw: string, fallback = 'file'): string {
+  return raw.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || fallback;
+}
+
+function unlinkQuietly(filePath: string): void {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err: unknown) {
+    const code = err instanceof Error && 'code' in err ? String((err as NodeJS.ErrnoException).code) : '';
+    if (code !== 'ENOENT') {
+      console.warn(`⚠️ Impossible de supprimer le fichier temporaire ${path.basename(filePath)}:`, errorMessage(err));
+    }
+  }
+}
+
+const SESSION_COOKIE_OPTIONS = {
+  httpOnly: true,
+  sameSite: 'lax' as const,
+  secure: IS_PRODUCTION,
+  maxAge: SESSION_TTL_MS,
+};
 
 function requireDevMode(_req: Request, res: Response, next: NextFunction): void {
   if (!DEV_MODE) {
@@ -65,7 +141,7 @@ function requireDevMode(_req: Request, res: Response, next: NextFunction): void 
 
 // Hub Temps Réel SSE (Server-Sent Events)
 const sseClients = new Set<Response>();
-function broadcastRealtimeEvent(type: string, message?: string, payload?: any): void {
+function broadcastRealtimeEvent(type: string, message?: string, payload?: Record<string, unknown>): void {
   const data = JSON.stringify({ type, message, payload, ts: Date.now() });
   for (const client of sseClients) {
     try {
@@ -83,11 +159,14 @@ const bot = new HgwDiscordBot(db, proofsDir, (msg) => {
 });
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+app.use(express.json({ limit: '4mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Fichiers statiques et preuves
 const publicDir = path.resolve(__dirname, '../public');
 app.use('/uploads/proofs', express.static(proofsDir));
 app.use('/uploads/logos', express.static(logosDir, { maxAge: '7d', immutable: true }));
@@ -101,7 +180,6 @@ app.use(
   })
 );
 
-// Signatures HMAC de session (sans dépendance externe lourde)
 function signSessionToken(userId: string): string {
   const payload = Buffer.from(JSON.stringify({ uid: userId, iat: Date.now() })).toString('base64url');
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
@@ -110,25 +188,30 @@ function signSessionToken(userId: string): string {
 
 function verifySessionToken(token?: string): string | null {
   if (!token || !token.includes('.')) return null;
-  const [payload, sig] = token.split('.');
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payload, sig] = parts;
   const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
-  if (sig !== expected) return null;
+  if (!timingSafeEqualStr(sig, expected)) return null;
   try {
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return typeof data.uid === 'string' ? data.uid : null;
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { uid?: unknown; iat?: unknown };
+    if (typeof data.uid !== 'string' || typeof data.iat !== 'number') return null;
+    const age = Date.now() - data.iat;
+    if (age < -60_000 || age > SESSION_TTL_MS) return null;
+    return data.uid;
   } catch {
     return null;
   }
 }
 
 interface AuthedRequest extends Request {
-  user?: any;
+  user?: UserRow;
 }
 
 function attachUser(req: AuthedRequest, _res: Response, next: NextFunction): void {
   const uid = verifySessionToken(req.cookies?.[COOKIE_NAME]);
   if (uid) {
-    const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(uid);
+    const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(uid) as UserRow | undefined;
     if (user) req.user = user;
   }
   next();
@@ -144,20 +227,32 @@ function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): voi
 
 function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction): void {
   if (!req.user || req.user.is_admin !== 1) {
-    res.status(403).json({ error: 'Accès réservé aux administrateurs HGW.' });
+    res.status(403).json({ error: 'Accès réservé aux administrateurs.' });
     return;
   }
   next();
 }
 
+function isDraftBlocked(req: AuthedRequest): boolean {
+  const cfg = getEventConfig(db);
+  return cfg.effective_phase === 'draft' && req.user?.is_admin !== 1;
+}
+
 app.use(attachUser);
 
-// Rate-limiter léger en mémoire pour protéger les routes d'upload contre le spam
 const rateBuckets = new Map<string, number[]>();
 function createRateLimiter(maxRequests: number, windowMs: number) {
   return (req: AuthedRequest, res: Response, next: NextFunction): void => {
-    const key = `${req.user?.id || req.ip}:${req.baseUrl}${req.path}`;
+    const routePattern = (req.route as { path?: string } | undefined)?.path || req.path;
+    const key = `${req.user?.id || req.ip}:${req.baseUrl}${routePattern}`;
     const now = Date.now();
+    if (rateBuckets.size > 500) {
+      for (const [k, timestamps] of rateBuckets) {
+        const fresh = timestamps.filter((ts) => now - ts < windowMs);
+        if (fresh.length === 0) rateBuckets.delete(k);
+        else rateBuckets.set(k, fresh);
+      }
+    }
     const recent = (rateBuckets.get(key) || []).filter((ts) => now - ts < windowMs);
     if (recent.length >= maxRequests) {
       res.status(429).json({ error: 'Trop de requêtes rapprochées. Patiente quelques secondes avant de réessayer.' });
@@ -169,7 +264,6 @@ function createRateLimiter(maxRequests: number, windowMs: number) {
   };
 }
 
-// Vérifie les magic bytes d'une preuve uploadée (PNG, JPEG, GIF, WEBP, MP4, WEBM)
 function isValidMediaMagicBytes(filePath: string): boolean {
   try {
     const fd = fs.openSync(filePath, 'r');
@@ -177,17 +271,11 @@ function isValidMediaMagicBytes(filePath: string): boolean {
     const bytesRead = fs.readSync(fd, head, 0, 16, 0);
     fs.closeSync(fd);
     if (bytesRead < 4) return false;
-    // PNG: 89 50 4E 47
     if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return true;
-    // JPEG: FF D8 FF
     if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return true;
-    // GIF: 47 49 46 38
     if (head.subarray(0, 4).toString('ascii') === 'GIF8') return true;
-    // WEBP: RIFF....WEBP
     if (head.subarray(0, 4).toString('ascii') === 'RIFF' && head.subarray(8, 12).toString('ascii') === 'WEBP') return true;
-    // MP4 / MOV: ....ftyp
     if (head.subarray(4, 8).toString('ascii') === 'ftyp') return true;
-    // WEBM / MKV: 1A 45 DF A3
     if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return true;
     return false;
   } catch {
@@ -195,22 +283,18 @@ function isValidMediaMagicBytes(filePath: string): boolean {
   }
 }
 
-// Multer pour upload de preuves (images <= 10 Mo, vidéos courtes <= 20 Mo)
 const proofUpload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, proofsDir),
     filename: (_req, file, cb) => {
       const ext = path.extname(file.originalname).toLowerCase() || '.png';
-      const safeExt = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4', '.webm', '.mov'].includes(ext)
-        ? ext
-        : '.bin';
+      const safeExt = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4', '.webm', '.mov'].includes(ext) ? ext : '.bin';
       cb(null, `proof_${Date.now()}_${crypto.randomBytes(4).toString('hex')}${safeExt}`);
     },
   }),
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-// Multer en mémoire pour les replays Trackmania (.Replay.gbx <= 5 Mo)
 const gbxUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -264,17 +348,13 @@ app.get('/api/auth/discord/callback', async (req, res) => {
       }),
     });
 
-    if (!tokenRes.ok) {
-      throw new Error(`Discord token error: ${tokenRes.status}`);
-    }
+    if (!tokenRes.ok) throw new Error(`Discord token error: ${tokenRes.status}`);
     const tokenData = (await tokenRes.json()) as { access_token: string };
 
     const userRes = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${tokenData.access_token}` },
     });
-    if (!userRes.ok) {
-      throw new Error(`Discord user error: ${userRes.status}`);
-    }
+    if (!userRes.ok) throw new Error(`Discord user error: ${userRes.status}`);
     const discordUser = (await userRes.json()) as {
       id: string;
       username: string;
@@ -301,34 +381,22 @@ app.get('/api/auth/discord/callback', async (req, res) => {
          display_name = excluded.display_name,
          avatar = excluded.avatar,
          is_admin = CASE WHEN users.is_admin = 1 THEN 1 ELSE excluded.is_admin END`
-    ).run(
-      discordUser.id,
-      discordUser.username,
-      discordUser.global_name || discordUser.username,
-      avatarUrl,
-      isAdmin
-    );
+    ).run(discordUser.id, discordUser.username, discordUser.global_name || discordUser.username, avatarUrl, isAdmin);
 
     const token = signSessionToken(discordUser.id);
-    res.cookie(COOKIE_NAME, token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      maxAge: 14 * 24 * 3600 * 1000,
-    });
+    res.cookie(COOKIE_NAME, token, SESSION_COOKIE_OPTIONS);
     res.redirect('/');
-  } catch (err: any) {
-    console.error('❌ [OAuth2] Erreur callback Discord:', err?.message || err);
+  } catch (err: unknown) {
+    console.error('❌ [OAuth2] Erreur callback Discord:', errorMessage(err));
     res.redirect('/?error=oauth_failed');
   }
 });
 
-// Connexion rapide en mode démo (voir DEV_MODE)
 app.post('/api/auth/dev-login', (req, res) => {
   if (!DEV_MODE) {
     res.status(403).json({ error: 'Le mode Dev Login est désactivé en production.' });
     return;
   }
-
   const rawName = String(req.body.username || 'Hextaz').trim().slice(0, 32) || 'Hextaz';
   const asAdmin = req.body.isAdmin === true;
   const userId = String(req.body.userId || `user_${rawName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`);
@@ -342,13 +410,8 @@ app.post('/api/auth/dev-login', (req, res) => {
   ).run(userId, rawName.toLowerCase(), rawName, asAdmin ? 1 : 0);
 
   const token = signSessionToken(userId);
-  res.cookie(COOKIE_NAME, token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    maxAge: 14 * 24 * 3600 * 1000,
-  });
-
-  const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(userId);
+  res.cookie(COOKIE_NAME, token, SESSION_COOKIE_OPTIONS);
+  const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(userId) as UserRow | undefined;
   res.json({ ok: true, user });
 });
 
@@ -358,50 +421,74 @@ app.post('/api/auth/logout', (_req, res) => {
 });
 
 // ============================================================================
-// ÉTAT GLOBAL & PROFIL JOUEUR
+// ÉTAT GLOBAL, HALL OF FAME & PROFIL JOUEUR
 // ============================================================================
 
 app.get('/api/state', (req: AuthedRequest, res) => {
   const { dayKey, weekKey } = getParisDayAndWeekKey();
+  const eventConfig = getEventConfig(db);
+  const archivedEditions = listArchivedEditions(db);
+
+  // Isolation stricte de la phase Préparation (draft) pour les visiteurs et joueurs non-admin
+  if (eventConfig.effective_phase === 'draft' && req.user?.is_admin !== 1) {
+    const publicDraftConfig = {
+      event_name: eventConfig.event_name,
+      event_subtitle: eventConfig.event_subtitle,
+      effective_phase: eventConfig.effective_phase,
+      status_mode: eventConfig.status_mode,
+      acts_count: eventConfig.acts_count,
+      acts: [],
+      featured: { enabled: false, title: '', connector: 'standard', stages_enabled: false, ladder_enabled: false },
+    };
+    res.json({
+      serverTime: new Date().toISOString(),
+      dayKey,
+      weekKey,
+      eventSettings: publicDraftConfig,
+      eventConfig: publicDraftConfig,
+      maxWeeklyQuestsPerGame: eventConfig.max_quests_per_game_per_act,
+      minSelectedGames: eventConfig.min_selected_games,
+      oauthConfigured: Boolean(process.env.DISCORD_CLIENT_ID?.trim()),
+      allowDevLogin: DEV_MODE,
+      devMode: DEV_MODE,
+      botStatus: bot.getStatus(),
+      tmnfServer: null,
+      tombolaThreshold: eventConfig.tombola_threshold,
+      user: req.user || null,
+      mySelectedGames: [],
+      myDailyQuests: [],
+      myWeeklyGameCounts: {},
+      myRegularity: { activeDaysCount: 0, totalBonusPoints: 0, tiers: [] },
+      canRerollToday: false,
+      myFeaturedSubmissions: [],
+      myTmnfSubmissions: [],
+      myLedger: [],
+      recentFeed: [],
+      games: [],
+      featuredItems: [],
+      featuredLadder: [],
+      tmnfMaps: [],
+      weeklyTmnfLeaderboard: [],
+      tournaments: [],
+      leaderboard: [],
+      archivedEditions,
+      admin: null,
+    });
+    return;
+  }
+
   const games = db
     .prepare(
       `SELECT g.*, (SELECT COUNT(*) FROM quests q WHERE q.game_id = g.id AND q.active = 1) AS active_quest_count
        FROM games g ORDER BY g.sort_order ASC`
     )
-    .all();
+    .all() as (GameRow & { active_quest_count: number })[];
+
   const leaderboard = getGlobalLeaderboard(db);
-  const weeklyTmnf = recalculateWeeklyTmnfLeaderboard(db);
+  const featuredLadder = getFeaturedLadder(db);
+  const featuredItems = listFeaturedItems(db, false);
+  const tournaments = listTournamentsWithRegistrations(db, false);
 
-  // Records du serveur (WR Discord) par map Trackmania
-  const wrRows = db
-    .prepare(
-      `SELECT ts.map_id, ts.time_ms, u.display_name
-       FROM tmnf_submissions ts
-       JOIN users u ON u.id = ts.user_id
-       WHERE ts.time_ms = (
-         SELECT MIN(t2.time_ms) FROM tmnf_submissions t2 WHERE t2.map_id = ts.map_id
-       )
-       GROUP BY ts.map_id`
-    )
-    .all() as { map_id: string; time_ms: number; display_name: string }[];
-  const wrByMap = new Map(wrRows.map((r) => [r.map_id, r]));
-
-  const tmnfMaps = db.prepare(`SELECT * FROM tmnf_maps ORDER BY sort_order ASC`).all() as any[];
-  const formattedMaps = tmnfMaps.map((m) => {
-    const wr = wrByMap.get(m.id);
-    return {
-      ...m,
-      author_formatted: formatTmTime(m.author_ms),
-      gold_formatted: formatTmTime(m.gold_ms),
-      silver_formatted: formatTmTime(m.silver_ms),
-      bronze_formatted: formatTmTime(m.bronze_ms),
-      wr_time_ms: wr ? wr.time_ms : null,
-      wr_formatted: wr ? formatTmTime(wr.time_ms) : null,
-      wr_holder: wr ? wr.display_name : null,
-    };
-  });
-
-  // Fil d'activité global en direct (25 derniers mouvements de points)
   const recentFeed = db
     .prepare(
       `SELECT pl.*, u.display_name, u.avatar
@@ -410,43 +497,18 @@ app.get('/api/state', (req: AuthedRequest, res) => {
        ORDER BY pl.updated_at DESC, pl.id DESC
        LIMIT 25`
     )
-    .all();
-
-  const tournaments = db.prepare(`SELECT * FROM tournaments ORDER BY sort_order ASC`).all() as any[];
-  const allRegs = db
-    .prepare(
-      `SELECT tr.*, u.display_name, u.avatar
-       FROM tournament_registrations tr
-       JOIN users u ON u.id = tr.user_id
-       ORDER BY tr.pool ASC, tr.registered_at ASC`
-    )
-    .all() as any[];
-
-  const tournamentsWithRegs = tournaments.map((t) => ({
-    ...t,
-    points_scale: JSON.parse(t.points_scale_json),
-    registrations: allRegs
-      .filter((r) => r.tournament_id === t.id)
-      .map((r) => ({
-        ...r,
-        fg_shows: JSON.parse(r.fg_shows_json || '[0,0,0,0,0]'),
-      })),
-  }));
+    .all() as (PointsLedgerRow & { display_name: string; avatar: string | null })[];
 
   let mySelectedGames: string[] = [];
-  let myDailyQuests: any[] = [];
-  let myWeeklyGameCounts: Record<string, number> = {};
-  let myRegularity: any = {
+  let myDailyQuests: DailyAssignmentDetailRow[] = [];
+  const myWeeklyGameCounts: Record<string, number> = {};
+  let myRegularity: RegularitySummary = {
     activeDaysCount: 0,
     totalBonusPoints: 0,
-    tiers: [
-      { days: 4, points: 20, unlocked: false },
-      { days: 8, points: 40, unlocked: false },
-      { days: 12, points: 60, unlocked: false },
-    ],
+    tiers: eventConfig.regularity_tiers.map((t) => ({ days: t.days, points: t.points, unlocked: false })),
   };
-  let myTmnfSubmissions: any[] = [];
-  let myLedger: any[] = [];
+  let myFeaturedSubmissions: UserFeaturedItemSummary[] = [];
+  let myLedger: PointsLedgerRow[] = [];
   let canRerollToday = false;
 
   if (req.user) {
@@ -454,66 +516,59 @@ app.get('/api/state', (req: AuthedRequest, res) => {
       db.prepare(`SELECT game_id FROM user_games WHERE user_id = ?`).all(req.user.id) as { game_id: string }[]
     ).map((r) => r.game_id);
 
-    if (mySelectedGames.length >= 4) {
+    if (mySelectedGames.length >= eventConfig.min_selected_games && isPlayablePhase(eventConfig.effective_phase)) {
       myDailyQuests = drawDailyQuestsForUser(db, req.user.id);
     }
 
-    myRegularity = recalculateUserRegularityBonuses(db, req.user.id);
+    myRegularity = getUserRegularitySummary(db, req.user.id);
 
-    const weeklyRows = db
-      .prepare(
-        `SELECT q.game_id, COUNT(*) AS cnt
-         FROM daily_assignments da
-         JOIN quests q ON q.id = da.quest_id
-         WHERE da.user_id = ? AND da.week_key = ? AND da.status IN ('validated', 'submitted')
-         GROUP BY q.game_id`
-      )
-      .all(req.user.id, weekKey) as { game_id: string; cnt: number }[];
-    for (const r of weeklyRows) {
-      myWeeklyGameCounts[r.game_id] = r.cnt;
-    }
+    const actCounts = getUserActGameCounts(db, req.user.id);
+    for (const [gid, cnt] of actCounts) myWeeklyGameCounts[gid] = cnt;
 
-    myTmnfSubmissions = db
-      .prepare(
-        `SELECT map_id, MIN(time_ms) AS best_time_ms, MAX(points_awarded) AS best_points
-         FROM tmnf_submissions
-         WHERE user_id = ?
-         GROUP BY map_id`
-      )
-      .all(req.user.id)
-      .map((r: any) => ({
-        ...r,
-        best_time_formatted: formatTmTime(r.best_time_ms),
-      }));
+    myFeaturedSubmissions = getUserFeaturedSummary(db, req.user.id);
 
     myLedger = db
       .prepare(`SELECT * FROM points_ledger WHERE user_id = ? ORDER BY updated_at DESC, id DESC LIMIT 30`)
-      .all(req.user.id);
+      .all(req.user.id) as PointsLedgerRow[];
 
-    canRerollToday = !(req.user.reroll_day_key === dayKey && req.user.rerolls_used >= 1);
+    const usedToday = req.user.reroll_day_key === dayKey ? Number(req.user.rerolls_used || 0) : 0;
+    canRerollToday =
+      isPlayablePhase(eventConfig.effective_phase) &&
+      eventConfig.daily_rerolls_max > 0 &&
+      usedToday < eventConfig.daily_rerolls_max;
   }
 
-  const eventSettings = getEventSettings(db);
-
-  let pendingProofs: any[] = [];
-  let allUsers: any[] = [];
-  let stats: any = null;
+  let adminPayload: Record<string, unknown> | null = null;
   if (req.user?.is_admin === 1) {
-    pendingProofs = db
-      .prepare(
-        `SELECT da.*, q.title, q.description, q.difficulty, q.points, g.name AS game_name, g.emoji AS game_emoji, u.display_name, u.username
-         FROM daily_assignments da
-         JOIN quests q ON q.id = da.quest_id
-         JOIN games g ON g.id = q.game_id
-         JOIN users u ON u.id = da.user_id
-         WHERE da.status = 'submitted'
-         ORDER BY da.submitted_at ASC`
-      )
-      .all();
+    const dailyPending = (
+      db
+        .prepare(
+          `SELECT da.*, q.title, q.description, q.difficulty, q.points, q.game_id, g.name AS game_name, g.emoji AS game_emoji, u.display_name, u.username, u.avatar
+           FROM daily_assignments da
+           JOIN quests q ON q.id = da.quest_id
+           JOIN games g ON g.id = q.game_id
+           JOIN users u ON u.id = da.user_id
+           WHERE da.status = 'submitted'
+           ORDER BY da.submitted_at ASC`
+        )
+        .all() as DailyAssignmentDetailRow[]
+    ).map((r) => ({ ...r, kind: 'daily' as const }));
 
-    allUsers = db.prepare(`SELECT id, username, display_name, tmnf_login, is_admin FROM users ORDER BY display_name ASC`).all();
+    const featuredPending = listPendingFeaturedProofs(db);
+    const pendingProofs = [...dailyPending, ...featuredPending].sort((a, b) =>
+      String(a.submitted_at || '').localeCompare(String(b.submitted_at || ''))
+    );
 
-    const totalReplays = (db.prepare(`SELECT COUNT(*) AS cnt FROM tmnf_submissions`).get() as { cnt: number }).cnt;
+    const allUsers = db
+      .prepare(`SELECT id, username, display_name, avatar, tmnf_login, is_admin, created_at FROM users ORDER BY is_admin DESC, display_name ASC`)
+      .all() as Omit<UserRow, 'reroll_day_key' | 'rerolls_used'>[];
+
+    const allTournaments = listTournamentsWithRegistrations(db, true);
+    const allFeaturedItems = listFeaturedItems(db, true);
+
+    const totalFeaturedSubs = (
+      db.prepare(`SELECT COUNT(*) AS cnt FROM featured_submissions WHERE status = 'validated'`).get() as { cnt: number }
+    ).cnt;
     const totalValidatedQuests = (
       db.prepare(`SELECT COUNT(*) AS cnt FROM daily_assignments WHERE status = 'validated'`).get() as { cnt: number }
     ).cnt;
@@ -521,13 +576,20 @@ app.get('/api/state', (req: AuthedRequest, res) => {
       db.prepare(`SELECT COALESCE(SUM(points), 0) AS tot FROM points_ledger`).get() as { tot: number }
     ).tot;
 
-    stats = {
-      totalUsers: allUsers.length,
-      pendingProofsCount: pendingProofs.length,
-      totalReplays,
-      totalValidatedQuests,
-      totalPoints,
-      tombolaQualifiedCount: leaderboard.filter((p) => p.tombola_eligible).length,
+    adminPayload = {
+      pendingProofs,
+      allUsers,
+      allTournaments,
+      allFeaturedItems,
+      stats: {
+        totalUsers: allUsers.length,
+        pendingProofsCount: pendingProofs.length,
+        totalReplays: totalFeaturedSubs,
+        totalFeaturedSubs,
+        totalValidatedQuests,
+        totalPoints,
+        tombolaQualifiedCount: leaderboard.filter((p) => p.tombola_eligible).length,
+      },
     };
   }
 
@@ -535,37 +597,46 @@ app.get('/api/state', (req: AuthedRequest, res) => {
     serverTime: new Date().toISOString(),
     dayKey,
     weekKey,
-    eventSettings,
-    maxWeeklyQuestsPerGame: MAX_WEEKLY_QUESTS_PER_GAME,
+    eventSettings: eventConfig,
+    eventConfig,
+    maxWeeklyQuestsPerGame: eventConfig.max_quests_per_game_per_act,
+    minSelectedGames: eventConfig.min_selected_games,
     oauthConfigured: Boolean(process.env.DISCORD_CLIENT_ID?.trim()),
     allowDevLogin: DEV_MODE,
     devMode: DEV_MODE,
     botStatus: bot.getStatus(),
     tmnfServer: {
-      login: eventSettings.tmnf_server_login,
-      playitAddress: eventSettings.tmnf_playit_address,
-      joinUrl: eventSettings.tmnf_join_url,
+      login: eventConfig.featured.server_info.login,
+      playitAddress: eventConfig.featured.server_info.address,
+      joinUrl: eventConfig.featured.server_info.join_url,
     },
-    tombolaThreshold: TOMBOLA_POINTS_THRESHOLD,
+    tombolaThreshold: eventConfig.tombola_threshold,
     user: req.user || null,
     mySelectedGames,
     myDailyQuests,
     myWeeklyGameCounts,
     myRegularity,
     canRerollToday,
-    myTmnfSubmissions,
+    myFeaturedSubmissions,
+    myTmnfSubmissions: myFeaturedSubmissions,
     myLedger,
     recentFeed,
     games,
-    tmnfMaps: formattedMaps,
-    weeklyTmnfLeaderboard: weeklyTmnf,
-    tournaments: tournamentsWithRegs,
+    featuredItems,
+    featuredLadder,
+    tmnfMaps: featuredItems,
+    weeklyTmnfLeaderboard: featuredLadder,
+    tournaments,
     leaderboard,
-    admin: req.user?.is_admin === 1 ? { pendingProofs, allUsers, stats } : null,
+    archivedEditions,
+    admin: adminPayload,
   });
 });
 
-// Flux Temps Réel Server-Sent Events (SSE)
+app.get('/api/hall-of-fame', (_req, res) => {
+  res.json({ ok: true, editions: listArchivedEditions(db) });
+});
+
 app.get('/api/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -590,78 +661,70 @@ app.get('/api/events', (req, res) => {
   });
 });
 
-// Détail complet du journal de points (points_ledger) d'un joueur au clic sur le classement
-app.get('/api/player/:id/ledger', (req, res) => {
+app.get('/api/player/:id/ledger', (req: AuthedRequest, res) => {
+  if (isDraftBlocked(req)) {
+    res.status(403).json({ error: 'L’édition est en cours de préparation.' });
+    return;
+  }
   const userId = String(req.params.id);
   const player = db
     .prepare(`SELECT id, username, display_name, avatar, tmnf_login, created_at FROM users WHERE id = ?`)
-    .get(userId) as any;
+    .get(userId) as Omit<UserRow, 'is_admin' | 'reroll_day_key' | 'rerolls_used'> | undefined;
 
   if (!player) {
     res.status(404).json({ error: 'Joueur introuvable.' });
     return;
   }
 
-  const entries = db
-    .prepare(`SELECT * FROM points_ledger WHERE user_id = ? ORDER BY updated_at DESC, id DESC`)
-    .all(userId);
-
+  const entries = db.prepare(`SELECT * FROM points_ledger WHERE user_id = ? ORDER BY updated_at DESC, id DESC`).all(userId);
   const selectedGames = db
     .prepare(
       `SELECT g.id, g.name, g.short_name, g.emoji
-       FROM user_games ug
-       JOIN games g ON g.id = ug.game_id
-       WHERE ug.user_id = ?
-       ORDER BY g.sort_order ASC`
+       FROM user_games ug JOIN games g ON g.id = ug.game_id
+       WHERE ug.user_id = ? ORDER BY g.sort_order ASC`
     )
     .all(userId);
 
-  res.json({
-    ok: true,
-    player,
-    selectedGames,
-    entries,
-  });
+  res.json({ ok: true, player, selectedGames, entries });
 });
 
-// Liaison directe du Login Trackmania (pour remontée auto des chronos depuis le serveur dédié)
 app.post('/api/profile/tmnf-login', requireAuth, (req: AuthedRequest, res) => {
-  const tmnfLogin = String(req.body.tmnfLogin || '').trim().slice(0, 40);
-  db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(tmnfLogin || null, req.user.id);
-  broadcastRealtimeEvent('profile_updated');
-  res.json({ ok: true, tmnfLogin: tmnfLogin || null });
+  try {
+    const saved = updateUserTmnfLogin(db, req.user!.id, req.body?.tmnfLogin, {
+      isAdmin: req.user!.is_admin === 1,
+    });
+    broadcastRealtimeEvent('profile_updated');
+    res.json({ ok: true, tmnfLogin: saved });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err, 'Impossible de lier ce login Trackmania.') });
+  }
 });
 
-// Mise à jour du profil (jeux cochés + login TMNF optionnel)
 app.post('/api/profile/games', requireAuth, (req: AuthedRequest, res) => {
   try {
     const gameIds = Array.isArray(req.body.gameIds) ? req.body.gameIds.map(String) : [];
-    const tmnfLogin = typeof req.body.tmnfLogin === 'string' ? req.body.tmnfLogin.trim() : undefined;
-
+    const tmnfLogin = typeof req.body.tmnfLogin === 'string' ? req.body.tmnfLogin : undefined;
     if (tmnfLogin !== undefined) {
-      db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(tmnfLogin || null, req.user.id);
+      updateUserTmnfLogin(db, req.user!.id, tmnfLogin, { isAdmin: req.user!.is_admin === 1 });
     }
-
-    const result = saveUserSelectedGames(db, req.user.id, gameIds);
-    const quests = drawDailyQuestsForUser(db, req.user.id);
+    const result = saveUserSelectedGames(db, req.user!.id, gameIds);
+    const quests = drawDailyQuestsForUser(db, req.user!.id);
     res.json({ ok: true, ...result, quests });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Impossible de sauvegarder vos jeux.' });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err, 'Impossible de sauvegarder vos jeux.') });
   }
 });
 
-// Reroll d'un défi quotidien (1 max par jour)
 app.post('/api/quests/:id/reroll', requireAuth, (req: AuthedRequest, res) => {
   try {
     const assignmentId = Number.parseInt(String(req.params.id), 10);
-    const quests = rerollDailyAssignment(db, req.user.id, assignmentId);
+    const quests = rerollDailyAssignment(db, req.user!.id, assignmentId);
     res.json({ ok: true, quests });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Reroll impossible.' });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err, 'Reroll impossible.') });
   }
 });
 
-// Soumission d'une preuve (upload fichier ou lien) avec Rate-Limit & Validation Magic Bytes
 app.post(
   '/api/quests/:id/submit',
   requireAuth,
@@ -674,22 +737,16 @@ app.post(
       const proofNote = typeof req.body.proofNote === 'string' ? req.body.proofNote.trim() : '';
       const proofFile = req.file?.filename;
 
-      if (proofFile && req.file?.path) {
-        if (!isValidMediaMagicBytes(req.file.path)) {
-          try {
-            fs.unlinkSync(req.file.path);
-          } catch {
-            // ignore unlink error
-          }
-          res.status(400).json({
-            error: 'Format de fichier non reconnu : veuillez envoyer une vraie image (PNG, JPG, WEBP, GIF) ou vidéo (MP4, WEBM).',
-          });
-          return;
-        }
+      if (proofFile && req.file?.path && !isValidMediaMagicBytes(req.file.path)) {
+        unlinkQuietly(req.file.path);
+        res.status(400).json({
+          error: 'Format de fichier non reconnu : veuillez envoyer une vraie image (PNG, JPG, WEBP, GIF) ou vidéo (MP4, WEBM).',
+        });
+        return;
       }
 
       const updated = submitDailyProof(db, {
-        userId: req.user.id,
+        userId: req.user!.id,
         assignmentId,
         proofUrl: proofUrl || undefined,
         proofFile,
@@ -697,18 +754,73 @@ app.post(
       });
 
       await bot.notifyProofSubmitted(updated);
-      broadcastRealtimeEvent('proof_submitted', `🕵️ ${req.user.display_name} a soumis une preuve sur ${updated.game_name}`);
+      broadcastRealtimeEvent('proof_submitted', `🕵️ ${req.user!.display_name} a soumis une preuve sur ${updated.game_name}`);
       res.json({ ok: true, assignment: updated });
-    } catch (err: any) {
-      res.status(400).json({ error: err.message || 'Échec de l’envoi de la preuve.' });
+    } catch (err: unknown) {
+      if (req.file?.path) unlinkQuietly(req.file.path);
+      res.status(400).json({ error: errorMessage(err, 'Échec de l’envoi de la preuve.') });
     }
   }
 );
 
 // ============================================================================
-// TRACKMANIA (.Replay.gbx) UPLOAD SIMPLE + BATCH + CLASSEMENT PISTE + GHOST WR
+// JEU VEDETTE — CONNECTEUR STANDARD + CONNECTEUR TRACKMANIA (.Replay.gbx)
 // ============================================================================
 
+app.post(
+  '/api/featured/:itemId/submit',
+  requireAuth,
+  createRateLimiter(20, 60_000),
+  proofUpload.single('proofFile'),
+  async (req: AuthedRequest, res) => {
+    try {
+      const itemId = String(req.params.itemId);
+      const proofUrl = typeof req.body.proofUrl === 'string' ? req.body.proofUrl.trim() : '';
+      const proofNote = typeof req.body.proofNote === 'string' ? req.body.proofNote.trim() : '';
+      const proofFile = req.file?.filename;
+      const metricValue = req.body.metricValue !== undefined ? Number(req.body.metricValue) : undefined;
+
+      if (proofFile && req.file?.path && !isValidMediaMagicBytes(req.file.path)) {
+        unlinkQuietly(req.file.path);
+        res.status(400).json({
+          error: 'Format de fichier non reconnu : envoyez une vraie image (PNG, JPG, WEBP, GIF) ou vidéo (MP4, WEBM).',
+        });
+        return;
+      }
+
+      const sub = submitFeaturedStandard(db, {
+        userId: req.user!.id,
+        itemId,
+        metricValue,
+        proofUrl: proofUrl || undefined,
+        proofFile,
+        proofNote: proofNote || undefined,
+      });
+
+      await bot.notifyFeaturedProofSubmitted(sub);
+      broadcastRealtimeEvent('featured_updated', `⭐ ${req.user!.display_name} a soumis une preuve sur ${sub.item_code}`);
+      res.json({ ok: true, submission: sub });
+    } catch (err: unknown) {
+      if (req.file?.path) unlinkQuietly(req.file.path);
+      res.status(400).json({ error: errorMessage(err, 'Échec de la soumission.') });
+    }
+  }
+);
+
+app.get('/api/featured/:itemId/leaderboard', (req: AuthedRequest, res) => {
+  if (isDraftBlocked(req)) {
+    res.status(403).json({ error: 'L’édition est en cours de préparation.' });
+    return;
+  }
+  try {
+    const data = getFeaturedItemLeaderboard(db, String(req.params.itemId));
+    res.json({ ok: true, ...data });
+  } catch (err: unknown) {
+    res.status(404).json({ error: errorMessage(err, 'Épreuve introuvable.') });
+  }
+});
+
+// Routes Trackmania (.Replay.gbx + Ghost + XML-RPC Webhook)
 app.post(
   '/api/tmnf/submit-replay',
   requireAuth,
@@ -720,24 +832,19 @@ app.post(
         res.status(400).json({ error: 'Veuillez sélectionner un fichier .Replay.gbx.' });
         return;
       }
-
       const explicitMapId = typeof req.body.mapId === 'string' ? req.body.mapId : undefined;
-      const safeReplayName = `${Date.now()}_${req.user.id}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
-
+      const safeReplayName = `${Date.now()}_${safeFilename(req.user!.id, 'u')}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
       const result = submitTmnfReplay(db, {
-        userId: req.user.id,
+        userId: req.user!.id,
         buffer: req.file.buffer,
         fileName: safeReplayName,
         explicitMapId,
       });
-
       fs.writeFileSync(path.join(replaysDir, safeReplayName), req.file.buffer);
-
       broadcastRealtimeEvent(
         'tmnf_replay',
-        `🏎️ ${req.user.display_name} a signé ${result.parsed.formattedTime} sur ${result.map.code}${result.deltaPoints > 0 ? ` (+${result.deltaPoints} pts)` : ''}`
+        `🏎️ ${req.user!.display_name} a signé ${result.parsed.formattedTime} sur ${result.map.code}${result.deltaPoints > 0 ? ` (+${result.deltaPoints} pts)` : ''}`
       );
-
       res.json({
         ok: true,
         mapName: result.map.name,
@@ -750,13 +857,12 @@ app.post(
         deltaPoints: result.deltaPoints,
         isPersonalBest: result.isPersonalBest,
       });
-    } catch (err: any) {
-      res.status(400).json({ error: err.message || 'Erreur lors de la lecture du fichier .Replay.gbx.' });
+    } catch (err: unknown) {
+      res.status(400).json({ error: errorMessage(err, 'Erreur lors de la lecture du fichier .Replay.gbx.') });
     }
   }
 );
 
-// Upload par lot (Batch Drag & Drop jusqu'à 12 fichiers .Replay.gbx d'un seul coup)
 app.post(
   '/api/tmnf/submit-replays-batch',
   requireAuth,
@@ -769,19 +875,27 @@ app.post(
       return;
     }
 
-    const results: any[] = [];
+    const results: (
+      | {
+          fileName: string;
+          ok: true;
+          mapCode: string;
+          mapName: string;
+          formattedTime?: string;
+          medal: string;
+          deltaPoints: number;
+          isPersonalBest: boolean;
+        }
+      | { fileName: string; ok: false; error: string }
+    )[] = [];
     let totalDeltaPoints = 0;
     let validCount = 0;
     let errorCount = 0;
 
     for (const file of files) {
       try {
-        const safeReplayName = `${Date.now()}_${req.user.id}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
-        const out = submitTmnfReplay(db, {
-          userId: req.user.id,
-          buffer: file.buffer,
-          fileName: safeReplayName,
-        });
+        const safeReplayName = `${Date.now()}_${safeFilename(req.user!.id, 'u')}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
+        const out = submitTmnfReplay(db, { userId: req.user!.id, buffer: file.buffer, fileName: safeReplayName });
         fs.writeFileSync(path.join(replaysDir, safeReplayName), file.buffer);
         validCount++;
         totalDeltaPoints += out.deltaPoints;
@@ -795,57 +909,52 @@ app.post(
           deltaPoints: out.deltaPoints,
           isPersonalBest: out.isPersonalBest,
         });
-      } catch (err: any) {
+      } catch (err: unknown) {
         errorCount++;
-        results.push({
-          fileName: file.originalname,
-          ok: false,
-          error: err.message || 'Fichier .gbx invalide.',
-        });
+        results.push({ fileName: file.originalname, ok: false, error: errorMessage(err, 'Fichier .gbx invalide.') });
       }
     }
 
     if (validCount > 0) {
       broadcastRealtimeEvent(
         'tmnf_replay',
-        `🏎️ ${req.user.display_name} a validé ${validCount} replay(s) Trackmania${totalDeltaPoints > 0 ? ` (+${totalDeltaPoints} pts)` : ''} !`
+        `🏎️ ${req.user!.display_name} a validé ${validCount} replay(s) Trackmania${totalDeltaPoints > 0 ? ` (+${totalDeltaPoints} pts)` : ''} !`
       );
     }
 
-    res.json({
-      ok: validCount > 0,
-      validCount,
-      errorCount,
-      totalDeltaPoints,
-      results,
-    });
+    res.json({ ok: validCount > 0, validCount, errorCount, totalDeltaPoints, results });
   }
 );
 
-// Classement complet d'une piste Trackmania (Chasse aux Médailles ou Map Hebdo)
-app.get('/api/tmnf/map/:mapId/leaderboard', (req, res) => {
+app.get('/api/tmnf/map/:mapId/leaderboard', (req: AuthedRequest, res) => {
+  if (isDraftBlocked(req)) {
+    res.status(403).json({ error: 'L’édition est en cours de préparation.' });
+    return;
+  }
   try {
-    const data = getMapLeaderboard(db, String(req.params.mapId));
+    const data = getFeaturedItemLeaderboard(db, String(req.params.mapId));
     res.json({ ok: true, ...data });
-  } catch (err: any) {
-    res.status(404).json({ error: err.message || 'Piste introuvable.' });
+  } catch (err: unknown) {
+    res.status(404).json({ error: errorMessage(err, 'Piste introuvable.') });
   }
 });
 
-// Téléchargement du Ghost (.Replay.gbx) du WR Discord ou d'un joueur spécifique sur une piste
-app.get('/api/tmnf/map/:mapId/ghost/:userId', (req, res) => {
+app.get('/api/tmnf/map/:mapId/ghost/:userId', (req: AuthedRequest, res) => {
+  if (isDraftBlocked(req)) {
+    res.status(403).json({ error: 'L’édition est en cours de préparation.' });
+    return;
+  }
   try {
     const mapId = String(req.params.mapId);
     const userId = String(req.params.userId);
-    const data = getMapLeaderboard(db, mapId);
+    const data = getFeaturedItemLeaderboard(db, mapId);
     const entry = data.entries.find((e) => e.user_id === userId) || data.entries[0];
     if (!entry) {
       res.status(404).json({ error: 'Aucun temps enregistré sur cette piste.' });
       return;
     }
 
-    const downloadName = `Ghost_${data.map.code}_${entry.display_name.replace(/[^a-zA-Z0-9_-]/g, '')}_${entry.best_time_ms}ms.Replay.gbx`;
-
+    const downloadName = `Ghost_${safeFilename(data.map.code, 'map')}_${safeFilename(entry.display_name, 'driver')}_${entry.best_time_ms}ms.Replay.gbx`;
     if (entry.file_name) {
       const diskPath = path.join(replaysDir, path.basename(entry.file_name));
       if (fs.existsSync(diskPath)) {
@@ -856,7 +965,6 @@ app.get('/api/tmnf/map/:mapId/ghost/:userId', (req, res) => {
       }
     }
 
-    // Fallback synthétique avec le temps exact du joueur si le replay initial venait du seeder ou XML-RPC
     const buf = buildSampleReplayGbx({
       mapUid: data.map.uid,
       bestTimeMs: entry.best_time_ms,
@@ -864,26 +972,19 @@ app.get('/api/tmnf/map/:mapId/ghost/:userId', (req, res) => {
       playerNickname: entry.display_name,
       nonce: `ghost_${mapId}_${entry.user_id}`,
     });
-
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
     res.send(buf);
-  } catch (err: any) {
-    res.status(404).json({ error: err.message || 'Ghost introuvable.' });
+  } catch (err: unknown) {
+    res.status(404).json({ error: errorMessage(err, 'Ghost introuvable.') });
   }
 });
 
-/**
- * Webhook Temps Réel appelé automatiquement par le bridge XML-RPC du serveur dédié Trackmania (`infra/tmnf-xmlrpc-bridge.mjs`)
- * dès qu'un joueur franchit la ligne d'arrivée en jeu (`TrackMania.PlayerFinish`).
- */
 app.post('/api/tmnf/webhook', (req: AuthedRequest, res) => {
   const configuredSecret = process.env.TMNF_WEBHOOK_SECRET?.trim();
   const headerSecret = String(req.headers['x-tmnf-secret'] || '');
   const isAdminSession = req.user?.is_admin === 1;
-
-  // Fermé par défaut : sans TMNF_WEBHOOK_SECRET configuré, seule une session admin peut publier un chrono.
-  const secretOk = Boolean(configuredSecret) && headerSecret === configuredSecret;
+  const secretOk = Boolean(configuredSecret) && timingSafeEqualStr(headerSecret, configuredSecret!);
   if (!secretOk && !isAdminSession) {
     res.status(401).json({ error: 'Signature X-TMNF-Secret invalide ou absente.' });
     return;
@@ -901,76 +1002,86 @@ app.post('/api/tmnf/webhook', (req: AuthedRequest, res) => {
     if (out.matchedUser && out.map && (out.isPersonalBest || out.deltaPoints > 0)) {
       broadcastRealtimeEvent(
         'tmnf_live_finish',
-        `🏁 [Serveur TMNF Live] ${out.matchedUser.display_name} vient de rouler ${out.formattedTime} sur ${out.map.code}${out.deltaPoints > 0 ? ` (+${out.deltaPoints} pts)` : ' (Nouveau PB !)'}`
+        `🏁 [Serveur Live] ${out.matchedUser.display_name} vient de rouler ${out.formattedTime} sur ${out.map.code}${out.deltaPoints > 0 ? ` (+${out.deltaPoints} pts)` : ' (Nouveau PB !)'}`
       );
     }
-
     res.json({ ok: true, ...out });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Erreur webhook TMNF.' });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err, 'Erreur webhook TMNF.') });
   }
 });
 
-// Permet de télécharger un fichier .Replay.gbx d'exemple valide pour tester l'upload en 1 clic
 app.get('/api/tmnf/sample-replay/:mapId', requireDevMode, requireAuth, (req: AuthedRequest, res) => {
-  const map = db.prepare(`SELECT * FROM tmnf_maps WHERE id = ?`).get(String(req.params.mapId)) as any;
+  const items = listFeaturedItems(db, true);
+  const map = items.find((m) => m.id === String(req.params.mapId));
   if (!map) {
-    res.status(404).json({ error: 'Map introuvable.' });
+    res.status(404).json({ error: 'Piste introuvable.' });
     return;
   }
-
-  const sampleTime = map.author_ms - Math.floor(Math.random() * 350) - 40;
-  const login = req.user.tmnf_login || req.user.username || 'hgw_pilot';
+  const baseMs = map.author_ms || 30000;
+  const sampleTime = Math.max(5000, baseMs - Math.floor(Math.random() * 350) - 40);
+  const login = req.user!.tmnf_login || req.user!.username || 'hgw_pilot';
   const buf = buildSampleReplayGbx({
-    mapUid: map.uid,
+    mapUid: map.uid || map.external_uid || map.id,
     bestTimeMs: sampleTime,
     playerLogin: login,
-    playerNickname: req.user.display_name,
-    nonce: `${Date.now()}_${req.user.id}`,
+    playerNickname: req.user!.display_name,
+    nonce: `${Date.now()}_${req.user!.id}`,
   });
-
+  const dlName = `${safeFilename(map.code, 'map')}_${safeFilename(login, 'pilot')}_${sampleTime}ms.Replay.gbx`;
   res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="${map.code}_${login}_${sampleTime}ms.Replay.gbx"`
-  );
+  res.setHeader('Content-Disposition', `attachment; filename="${dlName}"`);
   res.send(buf);
 });
 
 // ============================================================================
-// TOURNOIS LIVE (INSCRIPTION, CHAPEAUX 1/2/3, TIRAGE ÉQUIPES, FALL GUYS)
+// TOURNOIS LIVE (INSCRIPTION JOUEUR)
 // ============================================================================
 
 app.post('/api/tournaments/:id/toggle', requireAuth, (req: AuthedRequest, res) => {
+  const cfg = getEventConfig(db);
+  if (cfg.effective_phase === 'draft' || cfg.effective_phase === 'closed') {
+    res.status(400).json({ error: 'Les inscriptions aux tournois sont fermées pour le moment.' });
+    return;
+  }
+
   const tournamentId = String(req.params.id);
-  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(tournamentId);
+  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ? AND active = 1`).get(tournamentId) as
+    | TournamentRow
+    | undefined;
   if (!tournament) {
     res.status(404).json({ error: 'Tournoi introuvable.' });
     return;
   }
+  if (tournament.status === 'live' || tournament.status === 'completed') {
+    res.status(400).json({ error: 'Ce tournoi est déjà en cours ou terminé : les inscriptions sont verrouillées.' });
+    return;
+  }
 
   const existing = db
-    .prepare(`SELECT * FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`)
-    .get(tournamentId, req.user.id);
+    .prepare(`SELECT placement, points_awarded FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`)
+    .get(tournamentId, req.user!.id) as { placement: number | null; points_awarded: number } | undefined;
 
   if (existing) {
-    db.prepare(`DELETE FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`).run(
-      tournamentId,
-      req.user.id
-    );
+    if (existing.placement !== null || existing.points_awarded > 0) {
+      res.status(400).json({ error: 'Impossible de se désinscrire : des résultats sont déjà enregistrés.' });
+      return;
+    }
+    db.prepare(`DELETE FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`).run(tournamentId, req.user!.id);
     broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true, registered: false });
   } else {
-    db.prepare(
-      `INSERT INTO tournament_registrations (tournament_id, user_id, pool, checked_in) VALUES (?, ?, 2, 0)`
-    ).run(tournamentId, req.user.id);
+    db.prepare(`INSERT INTO tournament_registrations (tournament_id, user_id, pool, checked_in) VALUES (?, ?, 2, 0)`).run(
+      tournamentId,
+      req.user!.id
+    );
     broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true, registered: true });
   }
 });
 
 // ============================================================================
-// BACK-OFFICE ADMIN (VALIDATION PREUVES, CHAPEAUX, TIRAGE LIVE, BACKUP, TOMBOLA)
+// BACK-OFFICE ADMIN — MODÉRATION UNIFIÉE, CONFIG, JEU VEDETTE, TOURNOIS, ÉDITIONS
 // ============================================================================
 
 app.post('/api/admin/proofs/:id/review', requireAdmin, (req: AuthedRequest, res) => {
@@ -986,44 +1097,165 @@ app.post('/api/admin/proofs/:id/review', requireAdmin, (req: AuthedRequest, res)
     const updated = reviewDailyAssignment(db, {
       assignmentId,
       action,
-      reviewerId: req.user.display_name,
+      reviewerId: req.user!.display_name,
+      rejectReason,
+    });
+    broadcastRealtimeEvent(
+      'points_updated',
+      action === 'approve' ? `✅ ${updated.display_name} a validé "${updated.title}" (+${updated.points} pts)` : undefined
+    );
+    res.json({ ok: true, assignment: updated });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+app.post('/api/admin/featured/submissions/:id/review', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const submissionId = Number.parseInt(String(req.params.id), 10);
+    const action = req.body.action === 'reject' ? 'reject' : 'approve';
+    const rejectReason = typeof req.body.rejectReason === 'string' ? req.body.rejectReason.trim() : undefined;
+    if (action === 'reject' && !rejectReason) {
+      res.status(400).json({ error: 'Un motif de refus est obligatoire.' });
+      return;
+    }
+
+    const updated = reviewFeaturedSubmission(db, {
+      submissionId,
+      action,
+      reviewerId: req.user!.display_name,
       rejectReason,
     });
     broadcastRealtimeEvent(
       'points_updated',
       action === 'approve'
-        ? `✅ ${updated.display_name} a validé "${updated.title}" (+${updated.points} pts)`
+        ? `⭐ ${updated.display_name} a validé ${updated.item_code} · ${updated.item_name}${updated.points_awarded > 0 ? ` (+${updated.points_awarded} pts)` : ''}`
         : undefined
     );
-    res.json({ ok: true, assignment: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    res.json({ ok: true, submission: updated });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+// Configuration complète d'édition (nouveau + alias legacy /api/admin/settings)
+const handleConfigUpdate = (req: AuthedRequest, res: Response) => {
+  try {
+    const updated = updateEventConfig(db, req.body || {});
+    recalculateFeaturedLadder(db);
+    recalculateAllFeaturedStages(db);
+    recalculateAllRegularityBonuses(db);
+    broadcastRealtimeEvent('settings_updated', '⚙️ Configuration de l’édition mise à jour !');
+    res.json({ ok: true, eventSettings: updated, eventConfig: updated });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+};
+app.post('/api/admin/settings', requireAdmin, handleConfigUpdate);
+app.post('/api/admin/config', requireAdmin, handleConfigUpdate);
+
+// Admin : Jeu Vedette (CRUD épreuves + import .Challenge.gbx / .Replay.gbx)
+app.get('/api/admin/featured', requireAdmin, (_req: AuthedRequest, res) => {
+  res.json({ ok: true, config: getEventConfig(db).featured, items: listFeaturedItems(db, true) });
+});
+
+app.post('/api/admin/featured/config', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const updated = updateEventConfig(db, { featured: req.body || {} });
+    recalculateFeaturedLadder(db);
+    recalculateAllFeaturedStages(db);
+    broadcastRealtimeEvent('featured_updated', '⭐ Configuration du jeu vedette mise à jour !');
+    res.json({ ok: true, featured: updated.featured, eventConfig: updated });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+app.post('/api/admin/featured/parse-gbx', requireAdmin, gbxUpload.single('file'), (req: AuthedRequest, res) => {
+  if (!req.file || !req.file.buffer) {
+    res.status(400).json({ error: 'Veuillez sélectionner un fichier .Challenge.gbx ou .Replay.gbx.' });
+    return;
+  }
+  const parsed = parseChallengeGbx(req.file.buffer);
+  if (!parsed.valid) {
+    res.status(400).json({ error: parsed.error || 'Fichier GBX illisible.' });
+    return;
+  }
+  res.json({ ok: true, parsed });
+});
+
+app.post('/api/admin/featured/items', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const item = createFeaturedItem(db, req.body || {});
+    broadcastRealtimeEvent('featured_updated');
+    res.json({ ok: true, item });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+app.put('/api/admin/featured/items/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const item = updateFeaturedItem(db, String(req.params.id), req.body || {});
+    recalculateAllFeaturedStages(db);
+    broadcastRealtimeEvent('featured_updated');
+    res.json({ ok: true, item });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+app.delete('/api/admin/featured/items/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    deleteFeaturedItem(db, String(req.params.id));
+    broadcastRealtimeEvent('featured_updated');
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    res.status(409).json({ error: errorMessage(err) });
+  }
+});
+
+// Admin : Tournois (CRUD + Gestion live)
+app.post('/api/admin/tournaments', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const tournament = createTournament(db, req.body || {});
+    broadcastRealtimeEvent('tournament_updated', `🏆 Nouveau tournoi ajouté : ${tournament.name}`);
+    res.json({ ok: true, tournament });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+app.put('/api/admin/tournaments/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const tournament = updateTournament(db, String(req.params.id), req.body || {});
+    broadcastRealtimeEvent('tournament_updated');
+    res.json({ ok: true, tournament });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+app.delete('/api/admin/tournaments/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    deleteTournament(db, String(req.params.id));
+    broadcastRealtimeEvent('tournament_updated');
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    res.status(409).json({ error: errorMessage(err) });
   }
 });
 
 app.post('/api/admin/tournaments/:id/player', requireAdmin, (req: AuthedRequest, res) => {
-  const tournamentId = String(req.params.id);
-  const { userId, pool, checkedIn } = req.body;
-
-  if (pool !== undefined) {
-    const p = Number(pool);
-    if ([1, 2, 3].includes(p)) {
-      db.prepare(`UPDATE tournament_registrations SET pool = ? WHERE tournament_id = ? AND user_id = ?`).run(
-        p,
-        tournamentId,
-        userId
-      );
-    }
+  try {
+    const tournamentId = String(req.params.id);
+    const { userId, pool, checkedIn, teamNumber, teamName } = req.body;
+    updateTournamentPlayer(db, tournamentId, { userId: String(userId), pool, checkedIn, teamNumber, teamName });
+    broadcastRealtimeEvent('tournament_updated');
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
-  if (checkedIn !== undefined) {
-    db.prepare(`UPDATE tournament_registrations SET checked_in = ? WHERE tournament_id = ? AND user_id = ?`).run(
-      checkedIn ? 1 : 0,
-      tournamentId,
-      userId
-    );
-  }
-  broadcastRealtimeEvent('tournament_updated');
-  res.json({ ok: true });
 });
 
 app.post('/api/admin/tournaments/:id/draw-teams', requireAdmin, async (req: AuthedRequest, res) => {
@@ -1035,8 +1267,8 @@ app.post('/api/admin/tournaments/:id/draw-teams', requireAdmin, async (req: Auth
     }
     broadcastRealtimeEvent('teams_drawn', `🎲 Les équipes de ${result.tournament.name} viennent d'être tirées au sort !`);
     res.json({ ok: true, ...result });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1046,19 +1278,120 @@ app.post('/api/admin/tournaments/:id/placements', requireAdmin, (req: AuthedRequ
     recordTournamentPlacements(db, String(req.params.id), placements);
     broadcastRealtimeEvent('points_updated', '🏆 Classement de tournoi mis à jour !');
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
+app.post('/api/admin/tournaments/:id/rounds', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const tournamentId = String(req.params.id);
+    const rawScores = Array.isArray(req.body.scores)
+      ? (req.body.scores as { userId?: unknown; scores?: unknown; shows?: unknown }[])
+      : [];
+    const normalized = rawScores.map((s) => ({
+      userId: String(s.userId),
+      scores: Array.isArray(s.scores) ? s.scores.map(Number) : Array.isArray(s.shows) ? s.shows.map(Number) : [],
+    }));
+    const updated = updateTournamentRoundScores(db, tournamentId, normalized);
+    broadcastRealtimeEvent('points_updated', '🏆 Scores des manches mis à jour !');
+    res.json({ ok: true, standings: updated });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+// Alias rétrocompatible Fall Guys
 app.post('/api/admin/fall-guys/scores', requireAdmin, (req: AuthedRequest, res) => {
   try {
-    const scores = Array.isArray(req.body.scores) ? req.body.scores : [];
-    const updated = updateFallGuysScoresAndRankings(db, scores);
+    const rawScores = Array.isArray(req.body.scores)
+      ? (req.body.scores as { userId?: unknown; shows?: unknown }[])
+      : [];
+    const updated = updateTournamentRoundScores(
+      db,
+      'fall_guys',
+      rawScores.map((s) => ({ userId: String(s.userId), scores: Array.isArray(s.shows) ? s.shows.map(Number) : [] }))
+    );
     broadcastRealtimeEvent('points_updated', '🫘 Scores Fall Guys mis à jour en direct !');
     res.json({ ok: true, standings: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+// Admin : Éditions & Hall of Fame
+app.post('/api/admin/editions/archive', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const out = archiveCurrentEdition(db, {
+      leaderboard: getGlobalLeaderboard(db),
+      customName: typeof req.body?.name === 'string' ? req.body.name : undefined,
+    });
+    broadcastRealtimeEvent('settings_updated', `🏛️ Édition « ${out.name} » archivée dans le Hall of Fame !`);
+    res.json({ ok: true, archive: out });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+app.post('/api/admin/editions/new', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const out = startNewEdition(db, {
+      newName: String(req.body?.newName || ''),
+      leaderboard: getGlobalLeaderboard(db),
+      archiveCurrent: req.body?.archiveCurrent !== false,
+      keepTournaments: req.body?.keepTournaments !== false,
+      keepFeaturedItems: req.body?.keepFeaturedItems !== false,
+    });
+    for (const f of out.orphanProofFiles) unlinkQuietly(path.join(proofsDir, path.basename(f)));
+    for (const f of out.orphanReplayFiles) unlinkQuietly(path.join(replaysDir, path.basename(f)));
+    broadcastRealtimeEvent('settings_updated', `🚀 Nouvelle édition « ${out.eventConfig.event_name} » créée en mode préparation.`);
+    res.json({ ok: true, archived: out.archived, eventConfig: out.eventConfig });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
+app.delete('/api/admin/editions/:id', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    deleteArchivedEdition(db, String(req.params.id));
+    broadcastRealtimeEvent('settings_updated');
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    res.status(404).json({ error: errorMessage(err) });
+  }
+});
+
+// Admin : Gestion des rôles Admin depuis l'UI (atomique)
+app.post('/api/admin/users/:id/admin', requireAdmin, (req: AuthedRequest, res) => {
+  const targetId = String(req.params.id);
+  const nextAdmin = req.body?.isAdmin ? 1 : 0;
+
+  try {
+    const tx = db.transaction(() => {
+      const target = db.prepare(`SELECT id, display_name, is_admin FROM users WHERE id = ?`).get(targetId) as
+        | Pick<UserRow, 'id' | 'display_name' | 'is_admin'>
+        | undefined;
+      if (!target) {
+        return { status: 404 as const, error: 'Utilisateur introuvable.' };
+      }
+      if (nextAdmin === 0 && target.is_admin === 1) {
+        const adminsCount = (db.prepare(`SELECT COUNT(*) AS c FROM users WHERE is_admin = 1`).get() as { c: number }).c;
+        if (adminsCount <= 1) {
+          return { status: 400 as const, error: 'Impossible de retirer les droits du dernier administrateur.' };
+        }
+      }
+      db.prepare(`UPDATE users SET is_admin = ? WHERE id = ?`).run(nextAdmin, targetId);
+      return { status: 200 as const };
+    });
+    const out = tx();
+    if (out.status !== 200) {
+      res.status(out.status).json({ error: out.error });
+      return;
+    }
+    broadcastRealtimeEvent('profile_updated');
+    res.json({ ok: true, userId: targetId, is_admin: nextAdmin });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1066,16 +1399,6 @@ app.post('/api/admin/cron/trigger', requireAdmin, (_req: AuthedRequest, res) => 
   const result = runNightlyDailyReset(db);
   broadcastRealtimeEvent('daily_reset', '⏰ Nouveaux défis quotidiens générés !');
   res.json({ ok: true, ...result });
-});
-
-app.post('/api/admin/settings', requireAdmin, (req: AuthedRequest, res) => {
-  try {
-    const updated = updateEventSettings(db, req.body || {});
-    broadcastRealtimeEvent('settings_updated', '⚙️ Paramètres et dates de la HGW mis à jour !');
-    res.json({ ok: true, eventSettings: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
 });
 
 app.post('/api/admin/manual-points', requireAdmin, (req: AuthedRequest, res) => {
@@ -1093,33 +1416,40 @@ app.post('/api/admin/manual-points', requireAdmin, (req: AuthedRequest, res) => 
     });
     broadcastRealtimeEvent('points_updated', `🎁 Points bonus attribués (${points > 0 ? `+${points}` : points} pts) !`);
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
 app.post('/api/admin/tombola/draw', requireAdmin, (_req: AuthedRequest, res) => {
+  const cfg = getEventConfig(db);
   const lb = getGlobalLeaderboard(db);
   const qualified = lb.filter((p) => p.tombola_eligible);
   if (qualified.length === 0) {
-    res.status(400).json({ error: 'Aucun joueur n’a encore atteint le seuil de 300 pts pour la Tombola.' });
+    res.status(400).json({ error: `Aucun joueur n’a encore atteint le seuil de ${cfg.tombola_threshold} pts pour la Tombola.` });
     return;
   }
   const idx = crypto.randomInt(0, qualified.length);
   const winner = qualified[idx];
+
+  // Mémoriser le gagnant pour l'archivage Hall of Fame
+  db.prepare(
+    `INSERT INTO event_settings (key, value, updated_at) VALUES ('last_tombola_winner_json', ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+  ).run(JSON.stringify({ id: winner.id, display_name: winner.display_name, total_points: winner.total_points }));
+
   broadcastRealtimeEvent(
     'tombola_winner',
-    `🎟️ TIRAGE TOMBOLA HGW : Félicitations à ${winner.display_name} (${winner.total_points} pts) qui remporte la Grande Tombola !`,
+    `🎟️ TIRAGE TOMBOLA : Félicitations à ${winner.display_name} (${winner.total_points} pts) qui remporte la Grande Tombola !`,
     { winner, candidates: qualified, eligibleCount: qualified.length }
   );
   res.json({ ok: true, winner, candidates: qualified, eligibleCount: qualified.length });
 });
 
 // ============================================================================
-// CATALOGUE JEUX & DÉFIS (CRUD admin + logos)
+// CATALOGUE JEUX & DÉFIS (CRUD + LOGOS + IMPORT / EXPORT JSON)
 // ============================================================================
 
-// Seuls les formats raster sont acceptés : un SVG servi depuis notre domaine pourrait embarquer du script.
 function detectImageExt(buf: Buffer): '.png' | '.jpg' | '.webp' | '.gif' | null {
   if (buf.length < 12) return null;
   if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
@@ -1143,8 +1473,8 @@ function storeLogo(gameId: string, buf: Buffer): string {
   return `/uploads/logos/${name}`;
 }
 
-function setGameLogo(gameId: string, buf: Buffer): any {
-  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(gameId) as any;
+function setGameLogo(gameId: string, buf: Buffer): GameRow {
+  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(gameId) as GameRow | undefined;
   if (!game) throw new Error('Jeu introuvable.');
   const url = storeLogo(gameId, buf);
   const updated = updateGame(db, gameId, { logo_url: url });
@@ -1162,13 +1492,33 @@ app.get('/api/admin/catalog', requireAdmin, (_req: AuthedRequest, res) => {
   res.json({ ...listCatalog(db), logoSearchEnabled: Boolean(STEAMGRIDDB_API_KEY) });
 });
 
+app.get('/api/admin/catalog/export', requireAdmin, (req: AuthedRequest, res) => {
+  const gameId = typeof req.query.gameId === 'string' && req.query.gameId.trim() ? req.query.gameId.trim() : undefined;
+  const data = exportCatalog(db, gameId);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const safeId = gameId ? `-${safeFilename(gameId, 'game')}` : '';
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="hgw-catalog${safeId}-${stamp}.json"`);
+  res.send(JSON.stringify(data, null, 2));
+});
+
+app.post('/api/admin/catalog/import', requireAdmin, (req: AuthedRequest, res) => {
+  try {
+    const out = importCatalog(db, req.body || {});
+    catalogChanged();
+    res.json({ ok: true, ...out });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
+  }
+});
+
 app.post('/api/admin/games', requireAdmin, (req: AuthedRequest, res) => {
   try {
     const game = createGame(db, req.body || {});
     catalogChanged();
     res.json({ ok: true, game });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1180,8 +1530,8 @@ app.put('/api/admin/games/:id', requireAdmin, (req: AuthedRequest, res) => {
     if (before && before.logo_url !== game.logo_url) removeLocalLogo(before.logo_url);
     catalogChanged();
     res.json({ ok: true, game });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1191,8 +1541,8 @@ app.delete('/api/admin/games/:id', requireAdmin, (req: AuthedRequest, res) => {
     removeLocalLogo(result.logo_url);
     catalogChanged();
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(409).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(409).json({ error: errorMessage(err) });
   }
 });
 
@@ -1202,13 +1552,16 @@ app.post('/api/admin/games/:id/logo', requireAdmin, logoUpload.single('logo'), (
     const game = setGameLogo(String(req.params.id), req.file.buffer);
     catalogChanged();
     res.json({ ok: true, game });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
-// Recherche de logos via SteamGridDB (optionnelle : nécessite STEAMGRIDDB_API_KEY)
-async function steamGridDb(pathname: string): Promise<any> {
+interface SteamGridDbResponse<T> {
+  data?: T[];
+}
+
+async function steamGridDb<T>(pathname: string): Promise<SteamGridDbResponse<T>> {
   let r: globalThis.Response;
   try {
     r = await fetch(`https://www.steamgriddb.com/api/v2${pathname}`, {
@@ -1221,7 +1574,7 @@ async function steamGridDb(pathname: string): Promise<any> {
   if (r.status === 401 || r.status === 403) throw new Error('Clé SteamGridDB refusée : vérifie STEAMGRIDDB_API_KEY.');
   if (r.status === 404) return { data: [] };
   if (!r.ok) throw new Error(`SteamGridDB indisponible (HTTP ${r.status}).`);
-  return r.json();
+  return (await r.json()) as SteamGridDbResponse<T>;
 }
 
 function requireLogoSearch(_req: Request, res: Response, next: NextFunction): void {
@@ -1239,16 +1592,18 @@ app.get('/api/admin/logo-search', requireAdmin, requireLogoSearch, async (req: A
       res.json({ results: [] });
       return;
     }
-    const data = await steamGridDb(`/search/autocomplete/${encodeURIComponent(q)}`);
-    const results = (data.data || []).slice(0, 8).map((g: any) => ({
+    const data = await steamGridDb<{ id: number; name: string; release_date?: number; verified?: boolean }>(
+      `/search/autocomplete/${encodeURIComponent(q)}`
+    );
+    const results = (data.data || []).slice(0, 8).map((g) => ({
       id: g.id,
       name: g.name,
       year: g.release_date ? new Date(g.release_date * 1000).getFullYear() : null,
       verified: Boolean(g.verified),
     }));
     res.json({ results });
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(502).json({ error: errorMessage(err) });
   }
 });
 
@@ -1257,19 +1612,19 @@ app.get('/api/admin/logo-search/:sgdbId/images', requireAdmin, requireLogoSearch
     const sgdbId = Number.parseInt(String(req.params.sgdbId), 10);
     if (!Number.isFinite(sgdbId)) throw new Error('Identifiant invalide.');
     const type = req.query.type === 'logos' ? 'logos' : 'icons';
-    const data = await steamGridDb(`/${type}/game/${sgdbId}?nsfw=false&humor=false`);
+    const data = await steamGridDb<{ id: number; url: string; thumb: string; width: number; height: number; mime: string }>(
+      `/${type}/game/${sgdbId}?nsfw=false&humor=false`
+    );
     const images = (data.data || [])
-      .filter((i: any) => ['image/png', 'image/jpeg', 'image/webp'].includes(i.mime))
+      .filter((i) => ['image/png', 'image/jpeg', 'image/webp'].includes(i.mime))
       .slice(0, 24)
-      .map((i: any) => ({ id: i.id, url: i.url, thumb: i.thumb, width: i.width, height: i.height }));
+      .map((i) => ({ id: i.id, url: i.url, thumb: i.thumb, width: i.width, height: i.height }));
     res.json({ images });
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(502).json({ error: errorMessage(err) });
   }
 });
 
-// Importe une image SteamGridDB et l'héberge localement (pas de hotlink : le logo survit si la source disparaît).
-// Seul le CDN SteamGridDB est autorisé, pour éviter que le serveur aille chercher n'importe quelle URL.
 app.post('/api/admin/games/:id/logo-import', requireAdmin, requireLogoSearch, async (req: AuthedRequest, res) => {
   try {
     let url: URL;
@@ -1289,8 +1644,8 @@ app.post('/api/admin/games/:id/logo-import', requireAdmin, requireLogoSearch, as
     const game = setGameLogo(String(req.params.id), buf);
     catalogChanged();
     res.json({ ok: true, game });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1299,8 +1654,8 @@ app.post('/api/admin/quests', requireAdmin, (req: AuthedRequest, res) => {
     const quest = createQuest(db, req.body || {});
     catalogChanged();
     res.json({ ok: true, quest });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1309,8 +1664,8 @@ app.put('/api/admin/quests/:id', requireAdmin, (req: AuthedRequest, res) => {
     const quest = updateQuest(db, String(req.params.id), req.body || {});
     catalogChanged();
     res.json({ ok: true, quest });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1319,50 +1674,49 @@ app.delete('/api/admin/quests/:id', requireAdmin, (req: AuthedRequest, res) => {
     deleteQuest(db, String(req.params.id));
     catalogChanged();
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(409).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(409).json({ error: errorMessage(err) });
   }
 });
 
-// Sauvegarde à chaud de la base SQLite (.sqlite) sans interrompre le serveur
+// Sauvegardes & Export JSON
 app.get('/api/admin/backup/sqlite', requireAdmin, async (_req: AuthedRequest, res) => {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const tmpBackupPath = path.join(replaysDir, `hgw-backup-${stamp}.sqlite`);
   try {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const tmpBackupPath = path.join(replaysDir, `hgw-backup-${stamp}.sqlite`);
     await db.backup(tmpBackupPath);
     const fileBuf = fs.readFileSync(tmpBackupPath);
-    try {
-      fs.unlinkSync(tmpBackupPath);
-    } catch {
-      // ignore unlink error
-    }
+    unlinkQuietly(tmpBackupPath);
     res.setHeader('Content-Type', 'application/x-sqlite3');
     res.setHeader('Content-Disposition', `attachment; filename="hgw-backup-${stamp.slice(0, 10)}.sqlite"`);
     res.send(fileBuf);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Erreur lors de la sauvegarde SQLite.' });
+  } catch (err: unknown) {
+    unlinkQuietly(tmpBackupPath);
+    res.status(500).json({ error: errorMessage(err, 'Erreur lors de la sauvegarde SQLite.') });
   }
 });
 
-// Export JSON intégral (audit / archivage de l'event)
 app.get('/api/admin/backup/json', requireAdmin, (_req: AuthedRequest, res) => {
   const stamp = new Date().toISOString().slice(0, 10);
   const payload = {
     exportedAt: new Date().toISOString(),
-    eventSettings: getEventSettings(db),
+    eventConfig: getEventConfig(db),
     leaderboard: getGlobalLeaderboard(db),
     users: db.prepare(`SELECT * FROM users`).all(),
     pointsLedger: db.prepare(`SELECT * FROM points_ledger ORDER BY id ASC`).all(),
-    tmnfSubmissions: db.prepare(`SELECT * FROM tmnf_submissions ORDER BY id ASC`).all(),
+    featuredItems: db.prepare(`SELECT * FROM featured_items ORDER BY sort_order ASC`).all(),
+    featuredSubmissions: db.prepare(`SELECT * FROM featured_submissions ORDER BY id ASC`).all(),
+    tournaments: db.prepare(`SELECT * FROM tournaments ORDER BY sort_order ASC`).all(),
     tournamentRegistrations: db.prepare(`SELECT * FROM tournament_registrations`).all(),
     dailyAssignments: db.prepare(`SELECT * FROM daily_assignments ORDER BY id ASC`).all(),
+    archivedEditions: listArchivedEditions(db),
   };
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="hgw-export-${stamp}.json"`);
   res.send(JSON.stringify(payload, null, 2));
 });
 
-// Seeder de démonstration en 1 clic pour peupler 12 joueurs, des médailles TMNF, des équipes RL Chapeaux et des preuves
+// Seeder de démonstration (mode dev uniquement)
 app.post('/api/admin/seed-demo', requireDevMode, requireAdmin, (_req: AuthedRequest, res) => {
   const demoRoster = [
     { id: 'demo_hextaz', name: 'Hextaz', pool: 1, games: ['rocket_league', 'tmnf', 'valorant', 'cod'], tmMs: 41890 },
@@ -1379,105 +1733,100 @@ app.post('/api/admin/seed-demo', requireDevMode, requireAdmin, (_req: AuthedRequ
     { id: 'demo_blitz', name: 'Blitz', pool: 3, games: ['brawlhalla', 'fall_guys', 'wii_sports', 'tmnf'], tmMs: 53400 },
   ];
 
-  const weeklyMap = db.prepare(`SELECT * FROM tmnf_maps WHERE is_weekly = 1 LIMIT 1`).get() as any;
-  const medal1 = db.prepare(`SELECT * FROM tmnf_maps WHERE id = 'medal_1'`).get() as any;
-  const medal2 = db.prepare(`SELECT * FROM tmnf_maps WHERE id = 'medal_2'`).get() as any;
-  const currentSettings = getEventSettings(db);
+  const items = listFeaturedItems(db, false);
+  const weeklyMap = items.find((m) => m.is_ladder);
+  const medal1 = items.find((m) => !m.is_ladder);
+  const medal2 = items.filter((m) => !m.is_ladder)[1];
+  const currentConfig = getEventConfig(db);
+  const activeTournaments = listTournamentsWithRegistrations(db, false);
 
   for (const p of demoRoster) {
-    db.prepare(
-      `INSERT INTO users (id, username, display_name, is_admin)
-       VALUES (?, ?, ?, 0)
-       ON CONFLICT(id) DO NOTHING`
-    ).run(p.id, p.name.toLowerCase(), p.name);
+    db.prepare(`INSERT INTO users (id, username, display_name, is_admin) VALUES (?, ?, ?, 0) ON CONFLICT(id) DO NOTHING`).run(
+      p.id,
+      p.name.toLowerCase(),
+      p.name
+    );
 
-    saveUserSelectedGames(db, p.id, p.games);
-    const quests = drawDailyQuestsForUser(db, p.id);
-
-    // Valider 1 ou 2 défis pour alimenter le classement et laisser 1 preuve en attente pour la démo admin
-    if (quests[0] && quests[0].status === 'open') {
-      submitDailyProof(db, {
-        userId: p.id,
-        assignmentId: quests[0].id,
-        proofUrl: 'https://medal.tv/games/rocket-league/clips/hgw-demo-clip',
-        proofNote: `Run validé par ${p.name} !`,
-      });
-      if (p.pool !== 3) {
-        reviewDailyAssignment(db, {
+    try {
+      saveUserSelectedGames(db, p.id, p.games);
+      const quests = drawDailyQuestsForUser(db, p.id);
+      if (quests[0] && quests[0].status === 'open') {
+        submitDailyProof(db, {
+          userId: p.id,
           assignmentId: quests[0].id,
-          action: 'approve',
-          reviewerId: 'Hextaz (AutoDemo)',
+          proofUrl: 'https://medal.tv/games/rocket-league/clips/hgw-demo-clip',
+          proofNote: `Run validé par ${p.name} !`,
         });
+        if (p.pool !== 3) {
+          reviewDailyAssignment(db, { assignmentId: quests[0].id, action: 'approve', reviewerId: 'Hextaz (AutoDemo)' });
+        }
       }
+    } catch (err: unknown) {
+      console.warn(`ℹ️ [seed-demo] Quêtes ignorées pour ${p.name}:`, errorMessage(err));
     }
 
-    // Inscrire tout le monde à RL Rumble (avec leur Chapeau 1/2/3) et Fall Guys
-    for (const tid of ['rl_rumble', 'brawlhalla', 'tmnf_cup', 'fall_guys']) {
+    for (const t of activeTournaments) {
       db.prepare(
         `INSERT INTO tournament_registrations (tournament_id, user_id, pool, checked_in)
          VALUES (?, ?, ?, 1)
          ON CONFLICT(tournament_id, user_id) DO UPDATE SET pool = excluded.pool, checked_in = 1`
-      ).run(tid, p.id, p.pool);
+      ).run(t.id, p.id, p.pool);
     }
 
-    // Soumettre des replays sur A01-Race et A02-Race (et sur la Map Serveur 24/7 si Semaine 2 est ouverte)
     const existingSub = db
-      .prepare(`SELECT COUNT(*) AS cnt FROM tmnf_submissions WHERE user_id = ?`)
+      .prepare(`SELECT COUNT(*) AS cnt FROM featured_submissions WHERE user_id = ?`)
       .get(p.id) as { cnt: number };
 
-    if (existingSub.cnt === 0 && medal1) {
-      const bufMedal1 = buildSampleReplayGbx({
-        mapUid: medal1.uid,
-        bestTimeMs: medal1.author_ms + (p.pool - 1) * 900,
-        playerLogin: p.name.toLowerCase(),
-        playerNickname: p.name,
-        nonce: `medal1_${p.id}`,
-      });
-      submitTmnfReplay(db, {
-        userId: p.id,
-        buffer: bufMedal1,
-        fileName: `${p.name}_A01.Replay.gbx`,
-      });
-
-      if (medal2) {
-        const bufMedal2 = buildSampleReplayGbx({
-          mapUid: medal2.uid,
-          bestTimeMs: medal2.author_ms + (p.pool - 1) * 700,
+    if (existingSub.cnt === 0 && currentConfig.featured.enabled && currentConfig.featured.connector === 'tmnf_gbx' && medal1) {
+      try {
+        const bufMedal1 = buildSampleReplayGbx({
+          mapUid: medal1.uid,
+          bestTimeMs: (medal1.author_ms || 25000) + (p.pool - 1) * 900,
           playerLogin: p.name.toLowerCase(),
           playerNickname: p.name,
-          nonce: `medal2_${p.id}`,
+          nonce: `medal1_${p.id}`,
         });
-        submitTmnfReplay(db, {
-          userId: p.id,
-          buffer: bufMedal2,
-          fileName: `${p.name}_A02.Replay.gbx`,
-        });
-      }
+        submitTmnfReplay(db, { userId: p.id, buffer: bufMedal1, fileName: `${p.name}_M1.Replay.gbx` });
 
-      if (weeklyMap && currentSettings.tmnf_weekly_unlocked) {
-        const bufWeekly = buildSampleReplayGbx({
-          mapUid: weeklyMap.uid,
-          bestTimeMs: p.tmMs,
-          playerLogin: p.name.toLowerCase(),
-          playerNickname: p.name,
-          nonce: `weekly_${p.id}`,
-        });
-        submitTmnfReplay(db, {
-          userId: p.id,
-          buffer: bufWeekly,
-          fileName: `${p.name}_weekly.Replay.gbx`,
-        });
+        if (medal2) {
+          const bufMedal2 = buildSampleReplayGbx({
+            mapUid: medal2.uid,
+            bestTimeMs: (medal2.author_ms || 20000) + (p.pool - 1) * 700,
+            playerLogin: p.name.toLowerCase(),
+            playerNickname: p.name,
+            nonce: `medal2_${p.id}`,
+          });
+          submitTmnfReplay(db, { userId: p.id, buffer: bufMedal2, fileName: `${p.name}_M2.Replay.gbx` });
+        }
+
+        if (weeklyMap && currentConfig.ladder_unlocked) {
+          const bufWeekly = buildSampleReplayGbx({
+            mapUid: weeklyMap.uid,
+            bestTimeMs: p.tmMs,
+            playerLogin: p.name.toLowerCase(),
+            playerNickname: p.name,
+            nonce: `weekly_${p.id}`,
+          });
+          submitTmnfReplay(db, { userId: p.id, buffer: bufWeekly, fileName: `${p.name}_weekly.Replay.gbx` });
+        }
+      } catch (err: unknown) {
+        console.warn(`ℹ️ [seed-demo] Replays ignorés pour ${p.name}:`, errorMessage(err));
       }
     }
   }
 
-  // Tirer les équipes équilibrées RL Rumble
-  generateBalancedTeams(db, 'rl_rumble', true);
+  const teamTourney = activeTournaments.find((t) => t.team_size > 1);
+  if (teamTourney) {
+    try {
+      generateBalancedTeams(db, teamTourney.id, true);
+    } catch (err: unknown) {
+      console.warn('ℹ️ [seed-demo] Tirage d’équipes ignoré:', errorMessage(err));
+    }
+  }
 
-  res.json({ ok: true, message: '12 joueurs de démo, chronos TMNF, preuves et équipes Chapeaux générés !' });
+  res.json({ ok: true, message: '12 joueurs de démo, preuves et inscriptions générés !' });
 });
 
-// Cron de 03h00 Europe/Paris (Décision D1/D5/D10)
 cron.schedule(
   '0 3 * * *',
   () => {
@@ -1490,7 +1839,6 @@ cron.schedule(
   { timezone: 'Europe/Paris' }
 );
 
-// Fallback SPA
 app.get('*', (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
