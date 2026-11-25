@@ -12,12 +12,11 @@
     />
     <!--
       Paramètres : ?pos=tl|tr|bl|br (coin du panneau, tl par défaut) · ?compact=1 (top 3, sans pied).
-      Mêmes tokens que le site (design system HGW v2) ; panneaux à 88 % d'opacité sur fond transparent.
     -->
     <style>
       :root {
-        --panel: rgba(19, 22, 29, 0.88); /* bg-surface à 88 % */
-        --raised: rgba(27, 31, 40, 0.9); /* bg-raised */
+        --panel: rgba(19, 22, 29, 0.88);
+        --raised: rgba(27, 31, 40, 0.9);
         --line-subtle: #2c3240;
         --ink-1: #f2f5f7;
         --ink-2: #b4bdc9;
@@ -35,23 +34,21 @@
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body { width: 100vw; height: 100vh; overflow: hidden; background: transparent !important; font-family: var(--font-sans); color: var(--ink-1); -webkit-font-smoothing: antialiased; }
 
-      /* Alerte centrale (6,5 s par événement temps réel) */
       .alerts { position: fixed; top: 28px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 10px; pointer-events: none; }
       .alert { display: flex; align-items: center; gap: 14px; min-width: 440px; max-width: 760px; padding: 14px 22px; border-radius: 14px; background: var(--panel); backdrop-filter: blur(12px); box-shadow: var(--shadow-modal), var(--shadow-glow-gold); animation: in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
       .alert__badge { flex: none; padding: 6px 10px; border-radius: 6px; background: var(--gold-500); color: var(--ink-on-gold); font: 700 12px/1 var(--font-display); letter-spacing: 0.06em; text-transform: uppercase; }
       .alert__text { font: 700 17px/24px var(--font-sans); }
       @keyframes in { from { opacity: 0; transform: translateY(-24px) scale(0.96); } to { opacity: 1; transform: none; } }
 
-      /* Panneau top 5 */
       .hud { position: fixed; top: 28px; left: 28px; width: 340px; padding: 14px 16px; border-radius: 14px; background: var(--panel); backdrop-filter: blur(12px); border: 1px solid var(--line-subtle); box-shadow: var(--shadow-modal); }
       .hud.pos-tr { left: auto; right: 28px; }
       .hud.pos-bl { top: auto; bottom: 28px; }
       .hud.pos-br { top: auto; left: auto; bottom: 28px; right: 28px; }
       .hud__head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line-subtle); }
-      .brand { display: flex; align-items: center; gap: 10px; }
-      .brand__mark { padding: 4px 7px; border-radius: 6px; background: var(--gold-500); color: var(--ink-on-gold); font: 700 13px/1 var(--font-display); }
-      .brand__title { font: 700 13px/16px var(--font-sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); }
-      .live { display: inline-flex; align-items: center; gap: 6px; font: 700 12px/1 var(--font-sans); color: var(--ink-2); }
+      .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+      .brand__mark { padding: 4px 7px; border-radius: 6px; background: var(--gold-500); color: var(--ink-on-gold); font: 700 13px/1 var(--font-display); flex: none; }
+      .brand__title { font: 700 13px/16px var(--font-sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .live { display: inline-flex; align-items: center; gap: 6px; font: 700 12px/1 var(--font-sans); color: var(--ink-2); flex: none; }
       .live i { width: 8px; height: 8px; border-radius: 50%; background: var(--success-500); }
       .live.off i { background: var(--ink-3); }
       .row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; margin-bottom: 4px; background: var(--raised); }
@@ -76,13 +73,13 @@
       <div class="hud__head">
         <div class="brand">
           <span class="brand__mark">HGW</span>
-          <span class="brand__title">Classement</span>
+          <span class="brand__title" id="hud-title">Classement</span>
         </div>
         <span class="live off" id="live"><i></i>En direct</span>
       </div>
       <div id="top"></div>
       <div class="hud__foot">
-        <span id="foot-tm">Serveur Trackmania</span>
+        <span id="foot-feat"></span>
         <span id="foot-tombola"></span>
       </div>
     </aside>
@@ -110,6 +107,10 @@
       async function refresh() {
         try {
           const state = await (await fetch('/api/state')).json();
+          const cfg = state.eventSettings || {};
+          const feat = cfg.featured || {};
+          document.getElementById('hud-title').textContent = cfg.event_name || 'Classement';
+
           const lb = (state.leaderboard || []).slice(0, compact ? 3 : 5);
           let prev = null;
           let rank = 0;
@@ -120,10 +121,16 @@
               return `<div class="row ${rank === 1 ? 'is-1' : ''}"><span class="row__rank">${rank}</span><span class="row__name">${esc(p.display_name)}</span><span class="row__pts">${p.total_points.toLocaleString('fr-FR')}</span></div>`;
             })
             .join('');
-          const wr = (state.weeklyTmnfLeaderboard || [])[0];
-          document.getElementById('foot-tm').innerHTML = wr
-            ? `Record serveur <b>${esc(wr.display_name)}</b> <span class="mono">${esc(wr.formatted_time)}</span>`
-            : 'Serveur Trackmania';
+
+          const wr = (state.featuredLadder || state.weeklyTmnfLeaderboard || [])[0];
+          const footFeat = document.getElementById('foot-feat');
+          if (feat.enabled && feat.ladder_enabled) {
+            footFeat.innerHTML = wr
+              ? `Leader ${esc(feat.title)} <b>${esc(wr.display_name)}</b> <span class="mono">${esc(wr.formatted_value || wr.formatted_time)}</span>`
+              : `${esc(feat.title)} · ${esc(feat.ladder_title || 'Ladder')}`;
+          } else {
+            footFeat.textContent = `${(state.leaderboard || []).length} joueurs`;
+          }
           const q = (state.leaderboard || []).filter((p) => p.tombola_eligible).length;
           document.getElementById('foot-tombola').textContent = `${q} qualifié${q > 1 ? 's' : ''} tombola`;
         } catch {
@@ -134,6 +141,7 @@
       const LABELS = {
         tmnf_live_finish: 'Record serveur',
         tmnf_replay: 'Replay validé',
+        featured_updated: 'Jeu vedette',
         points_updated: 'Points',
         teams_drawn: 'Tirage des équipes',
         tombola_winner: 'Tombola',

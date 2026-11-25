@@ -18,12 +18,9 @@ import {
 } from 'discord.js';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
-import {
-  drawDailyQuestsForUser,
-  getGlobalLeaderboard,
-  reviewDailyAssignment,
-  TOMBOLA_POINTS_THRESHOLD,
-} from './engine.js';
+import { getEventConfig } from './config.js';
+import { drawDailyQuestsForUser, getGlobalLeaderboard, reviewDailyAssignment } from './engine.js';
+import { formatMetricValue, reviewFeaturedSubmission } from './featured.js';
 
 export class HgwDiscordBot {
   private client: Client | null = null;
@@ -95,10 +92,10 @@ export class HgwDiscordBot {
     const commands = [
       new SlashCommandBuilder()
         .setName('defis')
-        .setDescription('Affiche vos 3 défis quotidiens HGW du jour et leur statut'),
+        .setDescription('Affiche vos défis quotidiens du jour et leur statut'),
       new SlashCommandBuilder()
         .setName('classement')
-        .setDescription('Affiche le Top 10 général de la Hextaz Games Week'),
+        .setDescription('Affiche le Top 10 général de l’édition en cours'),
       new SlashCommandBuilder()
         .setName('profil')
         .setDescription('Affiche votre récapitulatif de points (Async / Live / Tombola)'),
@@ -131,6 +128,7 @@ export class HgwDiscordBot {
 
   private async handleSlashCommand(interaction: any): Promise<void> {
     const baseUrl = process.env.BASE_URL || 'https://hgw.hextaz.dev';
+    const cfg = getEventConfig(this.db);
 
     if (interaction.commandName === 'classement') {
       const lb = getGlobalLeaderboard(this.db).slice(0, 10);
@@ -142,14 +140,14 @@ export class HgwDiscordBot {
       const lines = lb.map((p: any, i: number) => {
         const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`#${i + 1}\``;
         const ticket = p.tombola_eligible ? '🎟️' : '';
-        return `${medal} **${p.display_name}** — **${p.total_points} pts** *(Async: ${p.async_points} | Live: ${p.live_points})* ${ticket}`;
+        return `${medal} **${p.display_name}** — **${p.total_points} pts** *(Quinzaine: ${p.async_points} | Live: ${p.live_points})* ${ticket}`;
       });
 
       const embed = new EmbedBuilder()
-        .setTitle('🏆 Classement Général — Hextaz Games Week')
+        .setTitle(`🏆 Classement Général — ${cfg.event_name}`)
         .setColor(0xf59e0b)
         .setDescription(lines.join('\n'))
-        .setFooter({ text: `Ticket Tombola dès ${TOMBOLA_POINTS_THRESHOLD} pts • ${baseUrl}` })
+        .setFooter({ text: `Ticket Tombola dès ${cfg.tombola_threshold} pts • ${baseUrl}` })
         .setTimestamp();
 
       await interaction.reply({ embeds: [embed] });
@@ -160,7 +158,7 @@ export class HgwDiscordBot {
       const quests = drawDailyQuestsForUser(this.db, interaction.user.id);
       if (quests.length === 0) {
         await interaction.reply({
-          content: `🎮 Vous n'avez pas encore configuré vos jeux (min. 4 requis) ! Rendez-vous sur **${baseUrl}** pour générer vos 3 défis du jour.`,
+          content: `🎮 Vous n'avez pas encore configuré vos jeux (min. ${cfg.min_selected_games} requis) ! Rendez-vous sur **${baseUrl}** pour générer vos défis du jour.`,
           ephemeral: true,
         });
         return;
@@ -194,28 +192,41 @@ export class HgwDiscordBot {
       const me = lb.find((u: any) => u.id === interaction.user.id);
       if (!me) {
         await interaction.reply({
-          content: `Connectez-vous une première fois sur **${baseUrl}** pour créer votre profil HGW !`,
+          content: `Connectez-vous une première fois sur **${baseUrl}** pour créer votre profil !`,
           ephemeral: true,
         });
         return;
       }
 
+      const totalStages = (
+        this.db.prepare(`SELECT COUNT(*) AS c FROM featured_items WHERE active = 1 AND is_ladder = 0`).get() as { c: number }
+      ).c;
+
+      const fields = [
+        { name: 'Rang Général', value: `#${me.rank} / ${lb.length}`, inline: true },
+        { name: 'Points Totaux', value: `**${me.total_points} pts**`, inline: true },
+        {
+          name: `Ticket Tombola (${cfg.tombola_threshold} pts)`,
+          value: me.tombola_eligible ? '🎟️ **Qualifié !**' : `⏳ ${me.total_points}/${cfg.tombola_threshold} pts`,
+          inline: true,
+        },
+        { name: 'Points Semaine (Async)', value: `${me.async_points} pts`, inline: true },
+        { name: 'Points Week-end (Live)', value: `${me.live_points} pts`, inline: true },
+        {
+          name: cfg.featured.enabled && totalStages > 0 ? `Défis / ${cfg.featured.title}` : 'Défis Validés',
+          value:
+            cfg.featured.enabled && totalStages > 0
+              ? `${me.quests_validated} défis • ${me.featured_stages_count}/${totalStages} épreuves`
+              : `${me.quests_validated} défis`,
+          inline: true,
+        },
+      ];
+
       const embed = new EmbedBuilder()
-        .setTitle(`👤 Profil HGW — ${me.display_name}`)
+        .setTitle(`👤 Profil — ${me.display_name}`)
         .setColor(0x3b82f6)
-        .addFields(
-          { name: 'Rang Général', value: `#${me.rank} / ${lb.length}`, inline: true },
-          { name: 'Points Totaux', value: `**${me.total_points} pts**`, inline: true },
-          {
-            name: 'Ticket Tombola (300 pts)',
-            value: me.tombola_eligible ? '🎟️ **Qualifié !**' : `⏳ ${me.total_points}/${TOMBOLA_POINTS_THRESHOLD} pts`,
-            inline: true,
-          },
-          { name: 'Points Semaine (Async)', value: `${me.async_points} pts`, inline: true },
-          { name: 'Points Week-end (Live)', value: `${me.live_points} pts`, inline: true },
-          { name: 'Défis Validés / Médailles TM', value: `${me.quests_validated} défis • ${me.tmnf_medals_count}/8 maps`, inline: true }
-        )
-        .setFooter({ text: baseUrl });
+        .addFields(fields)
+        .setFooter({ text: `${cfg.event_name} • ${baseUrl}` });
 
       await interaction.reply({ embeds: [embed], ephemeral: true });
     }
@@ -223,52 +234,60 @@ export class HgwDiscordBot {
 
   private async handleButtonInteraction(interaction: any): Promise<void> {
     const [prefix, rawId] = (interaction.customId || '').split(':');
-    if (prefix !== 'hgw_approve' && prefix !== 'hgw_reject') return;
+    const isDaily = prefix === 'hgw_approve' || prefix === 'hgw_reject';
+    const isFeatured = prefix === 'hgw_feat_approve' || prefix === 'hgw_feat_reject';
+    if (!isDaily && !isFeatured) return;
 
     if (!this.isDiscordUserAdmin(interaction.user.id, interaction.memberPermissions)) {
       await interaction.reply({
-        content: '⛔ Seuls les administrateurs HGW peuvent valider ou refuser une preuve.',
+        content: '⛔ Seuls les administrateurs peuvent valider ou refuser une preuve.',
         ephemeral: true,
       });
       return;
     }
 
-    const assignmentId = Number.parseInt(rawId, 10);
-    if (!Number.isFinite(assignmentId)) return;
+    const numericId = Number.parseInt(rawId, 10);
+    if (!Number.isFinite(numericId)) return;
 
     if (prefix === 'hgw_approve') {
       const updated = reviewDailyAssignment(this.db, {
-        assignmentId,
+        assignmentId: numericId,
         action: 'approve',
         reviewerId: interaction.user.username,
       });
-
       const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
         .setColor(0x10b981)
-        .setFooter({
-          text: `✅ Validé par ${interaction.user.username} (+${updated.points} pts crédités)`,
-        });
-
-      await interaction.update({
-        embeds: [approvedEmbed],
-        components: [],
-      });
+        .setFooter({ text: `✅ Validé par ${interaction.user.username} (+${updated.points} pts crédités)` });
+      await interaction.update({ embeds: [approvedEmbed], components: [] });
       this.onStateChanged?.(`✅ ${updated.display_name} a validé "${updated.title}" (+${updated.points} pts)`);
       return;
     }
 
-    if (prefix === 'hgw_reject') {
-      const modal = new ModalBuilder()
-        .setCustomId(`hgw_reject_modal:${assignmentId}`)
-        .setTitle(`Refuser la preuve #${assignmentId}`);
+    if (prefix === 'hgw_feat_approve') {
+      const updated = reviewFeaturedSubmission(this.db, {
+        submissionId: numericId,
+        action: 'approve',
+        reviewerId: interaction.user.username,
+      });
+      const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+        .setColor(0x10b981)
+        .setFooter({
+          text: `✅ Validé par ${interaction.user.username}${updated.points_awarded ? ` (+${updated.points_awarded} pts)` : ' (classement mis à jour)'}`,
+        });
+      await interaction.update({ embeds: [approvedEmbed], components: [] });
+      this.onStateChanged?.(`✅ ${updated.display_name} a validé ${updated.item_code} · ${updated.item_name}`);
+      return;
+    }
 
+    if (prefix === 'hgw_reject' || prefix === 'hgw_feat_reject') {
+      const modalId = isFeatured ? `hgw_feat_reject_modal:${numericId}` : `hgw_reject_modal:${numericId}`;
+      const modal = new ModalBuilder().setCustomId(modalId).setTitle(`Refuser la preuve #${numericId}`);
       const reasonInput = new TextInputBuilder()
         .setCustomId('reject_reason')
         .setLabel('Motif du refus (visible par le joueur)')
         .setPlaceholder('Ex: Screenshot coupé, score non visible, mauvais mode de jeu...')
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(true);
-
       modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(reasonInput));
       await interaction.showModal(modal);
     }
@@ -276,46 +295,48 @@ export class HgwDiscordBot {
 
   private async handleModalSubmit(interaction: any): Promise<void> {
     const [prefix, rawId] = (interaction.customId || '').split(':');
-    if (prefix !== 'hgw_reject_modal') return;
+    if (prefix !== 'hgw_reject_modal' && prefix !== 'hgw_feat_reject_modal') return;
 
     if (!this.isDiscordUserAdmin(interaction.user.id, interaction.memberPermissions)) {
       await interaction.reply({ content: '⛔ Action réservée aux admins.', ephemeral: true });
       return;
     }
 
-    const assignmentId = Number.parseInt(rawId, 10);
+    const numericId = Number.parseInt(rawId, 10);
     const reason = interaction.fields.getTextInputValue('reject_reason')?.trim() || 'Preuve non conforme';
 
-    const updated = reviewDailyAssignment(this.db, {
-      assignmentId,
-      action: 'reject',
-      reviewerId: interaction.user.username,
-      rejectReason: reason,
-    });
+    const updated =
+      prefix === 'hgw_feat_reject_modal'
+        ? reviewFeaturedSubmission(this.db, {
+            submissionId: numericId,
+            action: 'reject',
+            reviewerId: interaction.user.username,
+            rejectReason: reason,
+          })
+        : reviewDailyAssignment(this.db, {
+            assignmentId: numericId,
+            action: 'reject',
+            reviewerId: interaction.user.username,
+            rejectReason: reason,
+          });
 
     if (interaction.message) {
       const rejectedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
         .setColor(0xef4444)
         .addFields({ name: '❌ Motif du refus', value: reason })
-        .setFooter({
-          text: `❌ Refusé par ${interaction.user.username} (le joueur peut re-soumettre)`,
-        });
-
-      await interaction.message.edit({
-        embeds: [rejectedEmbed],
-        components: [],
-      });
+        .setFooter({ text: `❌ Refusé par ${interaction.user.username} (le joueur peut re-soumettre)` });
+      await interaction.message.edit({ embeds: [rejectedEmbed], components: [] });
     }
 
-    this.onStateChanged?.(`Preuve #${assignmentId} mise à jour`);
+    this.onStateChanged?.(`Preuve #${numericId} mise à jour`);
     await interaction.reply({
-      content: `❌ Preuve #${assignmentId} de **${updated.display_name}** refusée (${reason}).`,
+      content: `❌ Preuve #${numericId} de **${updated.display_name}** refusée (${reason}).`,
       ephemeral: true,
     });
   }
 
   /**
-   * Poste un embed dans `#preuves` avec les boutons `[ ✅ Valider (+XX pts) ]` et `[ ❌ Refuser ]` (Section 4.4).
+   * Poste un embed dans `#preuves` pour un défi quotidien.
    */
   public async notifyProofSubmitted(assignment: any): Promise<string | null> {
     const channelId = process.env.DISCORD_PROOFS_CHANNEL_ID?.trim();
@@ -325,12 +346,8 @@ export class HgwDiscordBot {
       const channel = (await this.client.channels.fetch(channelId)) as TextChannel | null;
       if (!channel || !channel.isTextBased()) return null;
 
-      const diffLabel =
-        assignment.difficulty === 'easy'
-          ? 'Facile (15 pts)'
-          : assignment.difficulty === 'medium'
-          ? 'Moyen (25 pts)'
-          : 'Difficile (40 pts)';
+      const diffNames: Record<string, string> = { easy: 'Facile', medium: 'Moyen', hard: 'Difficile' };
+      const diffLabel = `${diffNames[assignment.difficulty] || assignment.difficulty} (${assignment.points} pts)`;
 
       const embed = new EmbedBuilder()
         .setTitle(`${assignment.game_emoji} Preuve Défi #${assignment.id} — ${assignment.title}`)
@@ -343,18 +360,13 @@ export class HgwDiscordBot {
         )
         .setTimestamp();
 
-      if (assignment.proof_note) {
-        embed.addFields({ name: 'Commentaire du joueur', value: assignment.proof_note });
-      }
-      if (assignment.proof_url) {
-        embed.addFields({ name: '🔗 Lien externe', value: assignment.proof_url });
-      }
+      if (assignment.proof_note) embed.addFields({ name: 'Commentaire du joueur', value: assignment.proof_note });
+      if (assignment.proof_url) embed.addFields({ name: '🔗 Lien externe', value: assignment.proof_url });
 
       const files: AttachmentBuilder[] = [];
       if (assignment.proof_file) {
         const fullPath = path.join(this.proofsDir, assignment.proof_file);
-        const attachment = new AttachmentBuilder(fullPath, { name: assignment.proof_file });
-        files.push(attachment);
+        files.push(new AttachmentBuilder(fullPath, { name: assignment.proof_file }));
         if (/\.(png|jpe?g|webp|gif)$/i.test(assignment.proof_file)) {
           embed.setImage(`attachment://${assignment.proof_file}`);
         }
@@ -374,9 +386,7 @@ export class HgwDiscordBot {
       );
 
       const sent = await channel.send({ embeds: [embed], files, components: [row] });
-      this.db
-        .prepare(`UPDATE daily_assignments SET discord_message_id = ? WHERE id = ?`)
-        .run(sent.id, assignment.id);
+      this.db.prepare(`UPDATE daily_assignments SET discord_message_id = ? WHERE id = ?`).run(sent.id, assignment.id);
       return sent.id;
     } catch (err: any) {
       console.error('⚠️ [Discord Bot] Échec envoi embed #preuves:', err?.message || err);
@@ -385,8 +395,64 @@ export class HgwDiscordBot {
   }
 
   /**
-   * Publie les équipes tirées au sort par Chapeaux dans le salon Discord d'annonces (Section 4.2).
+   * Poste un embed dans `#preuves` pour une preuve Jeu Vedette (connecteur standard).
    */
+  public async notifyFeaturedProofSubmitted(sub: any): Promise<string | null> {
+    const channelId = process.env.DISCORD_PROOFS_CHANNEL_ID?.trim();
+    if (!this.client || !this.isReady || !channelId) return null;
+
+    try {
+      const channel = (await this.client.channels.fetch(channelId)) as TextChannel | null;
+      if (!channel || !channel.isTextBased()) return null;
+
+      const cfg = getEventConfig(this.db).featured;
+      const valStr = formatMetricValue(Number(sub.metric_value), cfg.metric_type, cfg.metric_unit);
+
+      const embed = new EmbedBuilder()
+        .setTitle(`⭐ Preuve ${cfg.title} #${sub.id} — ${sub.item_code} · ${sub.item_name}`)
+        .setColor(0x4cb8f7)
+        .addFields(
+          { name: 'Joueur', value: `**${sub.display_name}**`, inline: true },
+          { name: 'Type', value: sub.is_ladder ? cfg.ladder_title : cfg.stages_title, inline: true },
+          { name: 'Résultat déclaré', value: `**${valStr}**`, inline: true }
+        )
+        .setTimestamp();
+
+      if (sub.item_description) embed.addFields({ name: 'Épreuve', value: sub.item_description });
+      if (sub.proof_note) embed.addFields({ name: 'Commentaire du joueur', value: sub.proof_note });
+      if (sub.proof_url) embed.addFields({ name: '🔗 Lien externe', value: sub.proof_url });
+
+      const files: AttachmentBuilder[] = [];
+      if (sub.proof_file) {
+        const fullPath = path.join(this.proofsDir, sub.proof_file);
+        files.push(new AttachmentBuilder(fullPath, { name: sub.proof_file }));
+        if (/\.(png|jpe?g|webp|gif)$/i.test(sub.proof_file)) {
+          embed.setImage(`attachment://${sub.proof_file}`);
+        }
+      }
+
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`hgw_feat_approve:${sub.id}`)
+          .setLabel(sub.points_awarded > 0 ? `Valider (+${sub.points_awarded} pts)` : 'Valider')
+          .setEmoji('✅')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`hgw_feat_reject:${sub.id}`)
+          .setLabel('Refuser (avec motif)')
+          .setEmoji('❌')
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      const sent = await channel.send({ embeds: [embed], files, components: [row] });
+      this.db.prepare(`UPDATE featured_submissions SET discord_message_id = ? WHERE id = ?`).run(sent.id, sub.id);
+      return sent.id;
+    } catch (err: any) {
+      console.error('⚠️ [Discord Bot] Échec envoi embed vedette #preuves:', err?.message || err);
+      return null;
+    }
+  }
+
   public async announceTeams(tournament: any, teams: any[]): Promise<boolean> {
     const channelId =
       process.env.DISCORD_ANNOUNCE_CHANNEL_ID?.trim() || process.env.DISCORD_PROOFS_CHANNEL_ID?.trim();
@@ -397,7 +463,7 @@ export class HgwDiscordBot {
       if (!channel || !channel.isTextBased()) return false;
 
       const embed = new EmbedBuilder()
-        .setTitle(`${tournament.emoji} Tirage Officiel des Équipes — ${tournament.name}`)
+        .setTitle(`${tournament.emoji || '🏆'} Tirage Officiel des Équipes — ${tournament.name}`)
         .setColor(0x10b981)
         .setDescription(
           'Les équipes ont été tirées au sort en direct via le système d’équilibrage par **Chapeaux (Pool 1 / 2 / 3)** !'
@@ -405,9 +471,7 @@ export class HgwDiscordBot {
         .setTimestamp();
 
       for (const t of teams) {
-        const list = t.members
-          .map((m: any) => `• **${m.display_name}** *(Chapeau ${m.pool})*`)
-          .join('\n');
+        const list = t.members.map((m: any) => `• **${m.display_name}** *(Chapeau ${m.pool})*`).join('\n');
         embed.addFields({
           name: `${t.teamName} (Moy. Chapeau ${t.averagePool})`,
           value: list || 'Aucun joueur',
