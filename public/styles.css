@@ -577,3 +577,26 @@ a.hgw-tab, a.hgw-btn, a.usermenu__item, .admin-nav a { text-decoration: none; }
 .hgw-seg.is-disabled { opacity: .5; }
 #gf-sgdb-bar + #gf-sgdb-results:not(:empty) { margin-top: var(--space-3); }
 #gf-sgdb-bar[hidden] { display: none; }
+
+/* Modularité V2 : Hall of Fame, éditeurs de paliers/barèmes, presets manches, brouillon */
+.draft-banner { background: var(--gold-subtle); border: 1px solid var(--gold-500); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-5); display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+.inline-rows { display: flex; flex-direction: column; gap: var(--space-2); }
+.inline-row { display: grid; gap: var(--space-2); align-items: center; }
+.inline-row--3 { grid-template-columns: 1fr 110px auto; }
+.inline-row--4 { grid-template-columns: 120px 1fr 90px auto; }
+.inline-row--act { grid-template-columns: 140px 1fr; }
+.preset-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.preset-chip { appearance: none; border: 1px solid var(--line-subtle); background: var(--bg-raised); color: var(--ink-2); border-radius: 4px; padding: 2px 6px; font: 600 11px/1.2 var(--font-mono); cursor: pointer; }
+.preset-chip:hover { border-color: var(--gold-500); color: var(--gold-text); }
+.hof-card { display: flex; flex-direction: column; gap: var(--space-4); }
+.hof-podium { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+@media (max-width: 720px) { .hof-podium { grid-template-columns: 1fr; } }
+.health-list { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-4); }
+.hgw-medals--dynamic { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: var(--space-1); }
+.scale-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: var(--space-2); }
+.scale-cell { display: flex; flex-direction: column; gap: 4px; }
+.scale-cell label { font: 600 11px/14px var(--font-mono); color: var(--ink-3); text-transform: uppercase; }
+.admin-list-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--line-subtle); border-radius: var(--radius-md); background: var(--bg-raised); }
+.admin-list-row.is-off { opacity: .55; }
+.hgw-phases { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+
