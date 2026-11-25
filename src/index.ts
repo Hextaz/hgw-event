@@ -19,7 +19,7 @@ import {
   updateGame,
   updateQuest,
 } from './catalog.js';
-import { getEventConfig, updateEventConfig } from './config.js';
+import { getEventConfig, isPlayablePhase, updateEventConfig } from './config.js';
 import { initDb } from './db.js';
 import {
   archiveCurrentEdition,
@@ -31,27 +31,33 @@ import {
   drawDailyQuestsForUser,
   getGlobalLeaderboard,
   getParisDayAndWeekKey,
+  getUserActGameCounts,
+  getUserRegularitySummary,
   grantManualPoints,
-  recalculateUserRegularityBonuses,
+  recalculateAllRegularityBonuses,
   rerollDailyAssignment,
   reviewDailyAssignment,
   runNightlyDailyReset,
   saveUserSelectedGames,
   submitDailyProof,
+  updateUserTmnfLogin,
 } from './engine.js';
 import {
   createFeaturedItem,
   deleteFeaturedItem,
   getFeaturedItemLeaderboard,
+  getFeaturedLadder,
   getUserFeaturedSummary,
   listFeaturedItems,
   listPendingFeaturedProofs,
+  recalculateAllFeaturedStages,
   recalculateFeaturedLadder,
   recordTmnfLiveServerFinish,
   reviewFeaturedSubmission,
   submitFeaturedStandard,
   submitTmnfReplay,
   updateFeaturedItem,
+  type UserFeaturedItemSummary,
 } from './featured.js';
 import { buildSampleReplayGbx, parseChallengeGbx } from './gbx.js';
 import {
@@ -64,6 +70,15 @@ import {
   updateTournamentPlayer,
   updateTournamentRoundScores,
 } from './tournaments.js';
+import {
+  errorMessage,
+  type DailyAssignmentDetailRow,
+  type GameRow,
+  type PointsLedgerRow,
+  type RegularitySummary,
+  type TournamentRow,
+  type UserRow,
+} from './types.js';
 
 dotenv.config();
 
@@ -72,15 +87,49 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'hgw-dev-secret-change-in-production-2026';
-const COOKIE_NAME = 'hgw_session';
-
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const ENV_SESSION_SECRET = process.env.SESSION_SECRET?.trim();
+const SESSION_SECRET =
+  ENV_SESSION_SECRET ||
+  (IS_PRODUCTION ? crypto.randomBytes(32).toString('hex') : 'hgw-dev-secret-local-only');
+const COOKIE_NAME = 'hgw_session';
+const SESSION_TTL_MS = 14 * 24 * 3600 * 1000;
+
 const DEV_MODE =
   process.env.ALLOW_DEV_LOGIN === 'true' || (!IS_PRODUCTION && !process.env.DISCORD_CLIENT_ID?.trim());
-if (IS_PRODUCTION && SESSION_SECRET.startsWith('hgw-dev-secret')) {
-  console.warn('⚠️  SESSION_SECRET par défaut utilisé en production : définissez-en un dans .env.');
+if (IS_PRODUCTION && !ENV_SESSION_SECRET) {
+  console.warn(
+    '⚠️  SESSION_SECRET non défini en production : un secret éphémère aléatoire a été généré (les sessions expireront au redémarrage). Définissez SESSION_SECRET dans .env.'
+  );
 }
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+function safeFilename(raw: string, fallback = 'file'): string {
+  return raw.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80) || fallback;
+}
+
+function unlinkQuietly(filePath: string): void {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err: unknown) {
+    const code = err instanceof Error && 'code' in err ? String((err as NodeJS.ErrnoException).code) : '';
+    if (code !== 'ENOENT') {
+      console.warn(`⚠️ Impossible de supprimer le fichier temporaire ${path.basename(filePath)}:`, errorMessage(err));
+    }
+  }
+}
+
+const SESSION_COOKIE_OPTIONS = {
+  httpOnly: true,
+  sameSite: 'lax' as const,
+  secure: IS_PRODUCTION,
+  maxAge: SESSION_TTL_MS,
+};
 
 function requireDevMode(_req: Request, res: Response, next: NextFunction): void {
   if (!DEV_MODE) {
@@ -92,7 +141,7 @@ function requireDevMode(_req: Request, res: Response, next: NextFunction): void 
 
 // Hub Temps Réel SSE (Server-Sent Events)
 const sseClients = new Set<Response>();
-function broadcastRealtimeEvent(type: string, message?: string, payload?: any): void {
+function broadcastRealtimeEvent(type: string, message?: string, payload?: Record<string, unknown>): void {
   const data = JSON.stringify({ type, message, payload, ts: Date.now() });
   for (const client of sseClients) {
     try {
@@ -110,6 +159,10 @@ const bot = new HgwDiscordBot(db, proofsDir, (msg) => {
 });
 
 const app = express();
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
 app.use(express.json({ limit: '4mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
@@ -135,25 +188,30 @@ function signSessionToken(userId: string): string {
 
 function verifySessionToken(token?: string): string | null {
   if (!token || !token.includes('.')) return null;
-  const [payload, sig] = token.split('.');
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payload, sig] = parts;
   const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
-  if (sig !== expected) return null;
+  if (!timingSafeEqualStr(sig, expected)) return null;
   try {
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return typeof data.uid === 'string' ? data.uid : null;
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { uid?: unknown; iat?: unknown };
+    if (typeof data.uid !== 'string' || typeof data.iat !== 'number') return null;
+    const age = Date.now() - data.iat;
+    if (age < -60_000 || age > SESSION_TTL_MS) return null;
+    return data.uid;
   } catch {
     return null;
   }
 }
 
 interface AuthedRequest extends Request {
-  user?: any;
+  user?: UserRow;
 }
 
 function attachUser(req: AuthedRequest, _res: Response, next: NextFunction): void {
   const uid = verifySessionToken(req.cookies?.[COOKIE_NAME]);
   if (uid) {
-    const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(uid);
+    const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(uid) as UserRow | undefined;
     if (user) req.user = user;
   }
   next();
@@ -175,13 +233,26 @@ function requireAdmin(req: AuthedRequest, res: Response, next: NextFunction): vo
   next();
 }
 
+function isDraftBlocked(req: AuthedRequest): boolean {
+  const cfg = getEventConfig(db);
+  return cfg.effective_phase === 'draft' && req.user?.is_admin !== 1;
+}
+
 app.use(attachUser);
 
 const rateBuckets = new Map<string, number[]>();
 function createRateLimiter(maxRequests: number, windowMs: number) {
   return (req: AuthedRequest, res: Response, next: NextFunction): void => {
-    const key = `${req.user?.id || req.ip}:${req.baseUrl}${req.path}`;
+    const routePattern = (req.route as { path?: string } | undefined)?.path || req.path;
+    const key = `${req.user?.id || req.ip}:${req.baseUrl}${routePattern}`;
     const now = Date.now();
+    if (rateBuckets.size > 500) {
+      for (const [k, timestamps] of rateBuckets) {
+        const fresh = timestamps.filter((ts) => now - ts < windowMs);
+        if (fresh.length === 0) rateBuckets.delete(k);
+        else rateBuckets.set(k, fresh);
+      }
+    }
     const recent = (rateBuckets.get(key) || []).filter((ts) => now - ts < windowMs);
     if (recent.length >= maxRequests) {
       res.status(429).json({ error: 'Trop de requêtes rapprochées. Patiente quelques secondes avant de réessayer.' });
@@ -313,10 +384,10 @@ app.get('/api/auth/discord/callback', async (req, res) => {
     ).run(discordUser.id, discordUser.username, discordUser.global_name || discordUser.username, avatarUrl, isAdmin);
 
     const token = signSessionToken(discordUser.id);
-    res.cookie(COOKIE_NAME, token, { httpOnly: true, sameSite: 'lax', maxAge: 14 * 24 * 3600 * 1000 });
+    res.cookie(COOKIE_NAME, token, SESSION_COOKIE_OPTIONS);
     res.redirect('/');
-  } catch (err: any) {
-    console.error('❌ [OAuth2] Erreur callback Discord:', err?.message || err);
+  } catch (err: unknown) {
+    console.error('❌ [OAuth2] Erreur callback Discord:', errorMessage(err));
     res.redirect('/?error=oauth_failed');
   }
 });
@@ -339,8 +410,8 @@ app.post('/api/auth/dev-login', (req, res) => {
   ).run(userId, rawName.toLowerCase(), rawName, asAdmin ? 1 : 0);
 
   const token = signSessionToken(userId);
-  res.cookie(COOKIE_NAME, token, { httpOnly: true, sameSite: 'lax', maxAge: 14 * 24 * 3600 * 1000 });
-  const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(userId);
+  res.cookie(COOKIE_NAME, token, SESSION_COOKIE_OPTIONS);
+  const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(userId) as UserRow | undefined;
   res.json({ ok: true, user });
 });
 
@@ -356,18 +427,67 @@ app.post('/api/auth/logout', (_req, res) => {
 app.get('/api/state', (req: AuthedRequest, res) => {
   const { dayKey, weekKey } = getParisDayAndWeekKey();
   const eventConfig = getEventConfig(db);
+  const archivedEditions = listArchivedEditions(db);
+
+  // Isolation stricte de la phase Préparation (draft) pour les visiteurs et joueurs non-admin
+  if (eventConfig.effective_phase === 'draft' && req.user?.is_admin !== 1) {
+    const publicDraftConfig = {
+      event_name: eventConfig.event_name,
+      event_subtitle: eventConfig.event_subtitle,
+      effective_phase: eventConfig.effective_phase,
+      status_mode: eventConfig.status_mode,
+      acts_count: eventConfig.acts_count,
+      acts: [],
+      featured: { enabled: false, title: '', connector: 'standard', stages_enabled: false, ladder_enabled: false },
+    };
+    res.json({
+      serverTime: new Date().toISOString(),
+      dayKey,
+      weekKey,
+      eventSettings: publicDraftConfig,
+      eventConfig: publicDraftConfig,
+      maxWeeklyQuestsPerGame: eventConfig.max_quests_per_game_per_act,
+      minSelectedGames: eventConfig.min_selected_games,
+      oauthConfigured: Boolean(process.env.DISCORD_CLIENT_ID?.trim()),
+      allowDevLogin: DEV_MODE,
+      devMode: DEV_MODE,
+      botStatus: bot.getStatus(),
+      tmnfServer: null,
+      tombolaThreshold: eventConfig.tombola_threshold,
+      user: req.user || null,
+      mySelectedGames: [],
+      myDailyQuests: [],
+      myWeeklyGameCounts: {},
+      myRegularity: { activeDaysCount: 0, totalBonusPoints: 0, tiers: [] },
+      canRerollToday: false,
+      myFeaturedSubmissions: [],
+      myTmnfSubmissions: [],
+      myLedger: [],
+      recentFeed: [],
+      games: [],
+      featuredItems: [],
+      featuredLadder: [],
+      tmnfMaps: [],
+      weeklyTmnfLeaderboard: [],
+      tournaments: [],
+      leaderboard: [],
+      archivedEditions,
+      admin: null,
+    });
+    return;
+  }
+
   const games = db
     .prepare(
       `SELECT g.*, (SELECT COUNT(*) FROM quests q WHERE q.game_id = g.id AND q.active = 1) AS active_quest_count
        FROM games g ORDER BY g.sort_order ASC`
     )
-    .all();
+    .all() as (GameRow & { active_quest_count: number })[];
 
   const leaderboard = getGlobalLeaderboard(db);
-  const featuredLadder = recalculateFeaturedLadder(db);
+  const featuredLadder = getFeaturedLadder(db);
   const featuredItems = listFeaturedItems(db, false);
   const tournaments = listTournamentsWithRegistrations(db, false);
-  const archivedEditions = listArchivedEditions(db);
 
   const recentFeed = db
     .prepare(
@@ -377,18 +497,18 @@ app.get('/api/state', (req: AuthedRequest, res) => {
        ORDER BY pl.updated_at DESC, pl.id DESC
        LIMIT 25`
     )
-    .all();
+    .all() as (PointsLedgerRow & { display_name: string; avatar: string | null })[];
 
   let mySelectedGames: string[] = [];
-  let myDailyQuests: any[] = [];
-  let myWeeklyGameCounts: Record<string, number> = {};
-  let myRegularity: any = {
+  let myDailyQuests: DailyAssignmentDetailRow[] = [];
+  const myWeeklyGameCounts: Record<string, number> = {};
+  let myRegularity: RegularitySummary = {
     activeDaysCount: 0,
     totalBonusPoints: 0,
     tiers: eventConfig.regularity_tiers.map((t) => ({ days: t.days, points: t.points, unlocked: false })),
   };
-  let myFeaturedSubmissions: any[] = [];
-  let myLedger: any[] = [];
+  let myFeaturedSubmissions: UserFeaturedItemSummary[] = [];
+  let myLedger: PointsLedgerRow[] = [];
   let canRerollToday = false;
 
   if (req.user) {
@@ -396,43 +516,34 @@ app.get('/api/state', (req: AuthedRequest, res) => {
       db.prepare(`SELECT game_id FROM user_games WHERE user_id = ?`).all(req.user.id) as { game_id: string }[]
     ).map((r) => r.game_id);
 
-    if (
-      mySelectedGames.length >= eventConfig.min_selected_games &&
-      eventConfig.effective_phase !== 'draft' &&
-      eventConfig.effective_phase !== 'closed'
-    ) {
+    if (mySelectedGames.length >= eventConfig.min_selected_games && isPlayablePhase(eventConfig.effective_phase)) {
       myDailyQuests = drawDailyQuestsForUser(db, req.user.id);
     }
 
-    myRegularity = recalculateUserRegularityBonuses(db, req.user.id);
+    myRegularity = getUserRegularitySummary(db, req.user.id);
 
-    const weeklyRows = db
-      .prepare(
-        `SELECT q.game_id, COUNT(*) AS cnt
-         FROM daily_assignments da
-         JOIN quests q ON q.id = da.quest_id
-         WHERE da.user_id = ? AND da.week_key = ? AND da.status IN ('validated', 'submitted')
-         GROUP BY q.game_id`
-      )
-      .all(req.user.id, weekKey) as { game_id: string; cnt: number }[];
-    for (const r of weeklyRows) myWeeklyGameCounts[r.game_id] = r.cnt;
+    const actCounts = getUserActGameCounts(db, req.user.id);
+    for (const [gid, cnt] of actCounts) myWeeklyGameCounts[gid] = cnt;
 
     myFeaturedSubmissions = getUserFeaturedSummary(db, req.user.id);
 
     myLedger = db
       .prepare(`SELECT * FROM points_ledger WHERE user_id = ? ORDER BY updated_at DESC, id DESC LIMIT 30`)
-      .all(req.user.id);
+      .all(req.user.id) as PointsLedgerRow[];
 
     const usedToday = req.user.reroll_day_key === dayKey ? Number(req.user.rerolls_used || 0) : 0;
-    canRerollToday = eventConfig.daily_rerolls_max > 0 && usedToday < eventConfig.daily_rerolls_max;
+    canRerollToday =
+      isPlayablePhase(eventConfig.effective_phase) &&
+      eventConfig.daily_rerolls_max > 0 &&
+      usedToday < eventConfig.daily_rerolls_max;
   }
 
-  let adminPayload: any = null;
+  let adminPayload: Record<string, unknown> | null = null;
   if (req.user?.is_admin === 1) {
     const dailyPending = (
       db
         .prepare(
-          `SELECT da.*, q.title, q.description, q.difficulty, q.points, g.name AS game_name, g.emoji AS game_emoji, u.display_name, u.username, u.avatar
+          `SELECT da.*, q.title, q.description, q.difficulty, q.points, q.game_id, g.name AS game_name, g.emoji AS game_emoji, u.display_name, u.username, u.avatar
            FROM daily_assignments da
            JOIN quests q ON q.id = da.quest_id
            JOIN games g ON g.id = q.game_id
@@ -440,8 +551,8 @@ app.get('/api/state', (req: AuthedRequest, res) => {
            WHERE da.status = 'submitted'
            ORDER BY da.submitted_at ASC`
         )
-        .all() as any[]
-    ).map((r) => ({ ...r, kind: 'daily' }));
+        .all() as DailyAssignmentDetailRow[]
+    ).map((r) => ({ ...r, kind: 'daily' as const }));
 
     const featuredPending = listPendingFeaturedProofs(db);
     const pendingProofs = [...dailyPending, ...featuredPending].sort((a, b) =>
@@ -450,7 +561,7 @@ app.get('/api/state', (req: AuthedRequest, res) => {
 
     const allUsers = db
       .prepare(`SELECT id, username, display_name, avatar, tmnf_login, is_admin, created_at FROM users ORDER BY is_admin DESC, display_name ASC`)
-      .all();
+      .all() as Omit<UserRow, 'reroll_day_key' | 'rerolls_used'>[];
 
     const allTournaments = listTournamentsWithRegistrations(db, true);
     const allFeaturedItems = listFeaturedItems(db, true);
@@ -550,11 +661,15 @@ app.get('/api/events', (req, res) => {
   });
 });
 
-app.get('/api/player/:id/ledger', (req, res) => {
+app.get('/api/player/:id/ledger', (req: AuthedRequest, res) => {
+  if (isDraftBlocked(req)) {
+    res.status(403).json({ error: 'L’édition est en cours de préparation.' });
+    return;
+  }
   const userId = String(req.params.id);
   const player = db
     .prepare(`SELECT id, username, display_name, avatar, tmnf_login, created_at FROM users WHERE id = ?`)
-    .get(userId) as any;
+    .get(userId) as Omit<UserRow, 'is_admin' | 'reroll_day_key' | 'rerolls_used'> | undefined;
 
   if (!player) {
     res.status(404).json({ error: 'Joueur introuvable.' });
@@ -574,34 +689,39 @@ app.get('/api/player/:id/ledger', (req, res) => {
 });
 
 app.post('/api/profile/tmnf-login', requireAuth, (req: AuthedRequest, res) => {
-  const tmnfLogin = String(req.body.tmnfLogin || '').trim().slice(0, 40);
-  db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(tmnfLogin || null, req.user.id);
-  broadcastRealtimeEvent('profile_updated');
-  res.json({ ok: true, tmnfLogin: tmnfLogin || null });
+  try {
+    const saved = updateUserTmnfLogin(db, req.user!.id, req.body?.tmnfLogin, {
+      isAdmin: req.user!.is_admin === 1,
+    });
+    broadcastRealtimeEvent('profile_updated');
+    res.json({ ok: true, tmnfLogin: saved });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err, 'Impossible de lier ce login Trackmania.') });
+  }
 });
 
 app.post('/api/profile/games', requireAuth, (req: AuthedRequest, res) => {
   try {
     const gameIds = Array.isArray(req.body.gameIds) ? req.body.gameIds.map(String) : [];
-    const tmnfLogin = typeof req.body.tmnfLogin === 'string' ? req.body.tmnfLogin.trim() : undefined;
+    const tmnfLogin = typeof req.body.tmnfLogin === 'string' ? req.body.tmnfLogin : undefined;
     if (tmnfLogin !== undefined) {
-      db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(tmnfLogin || null, req.user.id);
+      updateUserTmnfLogin(db, req.user!.id, tmnfLogin, { isAdmin: req.user!.is_admin === 1 });
     }
-    const result = saveUserSelectedGames(db, req.user.id, gameIds);
-    const quests = drawDailyQuestsForUser(db, req.user.id);
+    const result = saveUserSelectedGames(db, req.user!.id, gameIds);
+    const quests = drawDailyQuestsForUser(db, req.user!.id);
     res.json({ ok: true, ...result, quests });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Impossible de sauvegarder vos jeux.' });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err, 'Impossible de sauvegarder vos jeux.') });
   }
 });
 
 app.post('/api/quests/:id/reroll', requireAuth, (req: AuthedRequest, res) => {
   try {
     const assignmentId = Number.parseInt(String(req.params.id), 10);
-    const quests = rerollDailyAssignment(db, req.user.id, assignmentId);
+    const quests = rerollDailyAssignment(db, req.user!.id, assignmentId);
     res.json({ ok: true, quests });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Reroll impossible.' });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err, 'Reroll impossible.') });
   }
 });
 
@@ -618,9 +738,7 @@ app.post(
       const proofFile = req.file?.filename;
 
       if (proofFile && req.file?.path && !isValidMediaMagicBytes(req.file.path)) {
-        try {
-          fs.unlinkSync(req.file.path);
-        } catch {}
+        unlinkQuietly(req.file.path);
         res.status(400).json({
           error: 'Format de fichier non reconnu : veuillez envoyer une vraie image (PNG, JPG, WEBP, GIF) ou vidéo (MP4, WEBM).',
         });
@@ -628,7 +746,7 @@ app.post(
       }
 
       const updated = submitDailyProof(db, {
-        userId: req.user.id,
+        userId: req.user!.id,
         assignmentId,
         proofUrl: proofUrl || undefined,
         proofFile,
@@ -636,10 +754,11 @@ app.post(
       });
 
       await bot.notifyProofSubmitted(updated);
-      broadcastRealtimeEvent('proof_submitted', `🕵️ ${req.user.display_name} a soumis une preuve sur ${updated.game_name}`);
+      broadcastRealtimeEvent('proof_submitted', `🕵️ ${req.user!.display_name} a soumis une preuve sur ${updated.game_name}`);
       res.json({ ok: true, assignment: updated });
-    } catch (err: any) {
-      res.status(400).json({ error: err.message || 'Échec de l’envoi de la preuve.' });
+    } catch (err: unknown) {
+      if (req.file?.path) unlinkQuietly(req.file.path);
+      res.status(400).json({ error: errorMessage(err, 'Échec de l’envoi de la preuve.') });
     }
   }
 );
@@ -662,9 +781,7 @@ app.post(
       const metricValue = req.body.metricValue !== undefined ? Number(req.body.metricValue) : undefined;
 
       if (proofFile && req.file?.path && !isValidMediaMagicBytes(req.file.path)) {
-        try {
-          fs.unlinkSync(req.file.path);
-        } catch {}
+        unlinkQuietly(req.file.path);
         res.status(400).json({
           error: 'Format de fichier non reconnu : envoyez une vraie image (PNG, JPG, WEBP, GIF) ou vidéo (MP4, WEBM).',
         });
@@ -672,7 +789,7 @@ app.post(
       }
 
       const sub = submitFeaturedStandard(db, {
-        userId: req.user.id,
+        userId: req.user!.id,
         itemId,
         metricValue,
         proofUrl: proofUrl || undefined,
@@ -681,20 +798,25 @@ app.post(
       });
 
       await bot.notifyFeaturedProofSubmitted(sub);
-      broadcastRealtimeEvent('featured_updated', `⭐ ${req.user.display_name} a soumis une preuve sur ${sub.item_code}`);
+      broadcastRealtimeEvent('featured_updated', `⭐ ${req.user!.display_name} a soumis une preuve sur ${sub.item_code}`);
       res.json({ ok: true, submission: sub });
-    } catch (err: any) {
-      res.status(400).json({ error: err.message || 'Échec de la soumission.' });
+    } catch (err: unknown) {
+      if (req.file?.path) unlinkQuietly(req.file.path);
+      res.status(400).json({ error: errorMessage(err, 'Échec de la soumission.') });
     }
   }
 );
 
-app.get('/api/featured/:itemId/leaderboard', (req, res) => {
+app.get('/api/featured/:itemId/leaderboard', (req: AuthedRequest, res) => {
+  if (isDraftBlocked(req)) {
+    res.status(403).json({ error: 'L’édition est en cours de préparation.' });
+    return;
+  }
   try {
     const data = getFeaturedItemLeaderboard(db, String(req.params.itemId));
     res.json({ ok: true, ...data });
-  } catch (err: any) {
-    res.status(404).json({ error: err.message || 'Épreuve introuvable.' });
+  } catch (err: unknown) {
+    res.status(404).json({ error: errorMessage(err, 'Épreuve introuvable.') });
   }
 });
 
@@ -711,9 +833,9 @@ app.post(
         return;
       }
       const explicitMapId = typeof req.body.mapId === 'string' ? req.body.mapId : undefined;
-      const safeReplayName = `${Date.now()}_${req.user.id}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
+      const safeReplayName = `${Date.now()}_${safeFilename(req.user!.id, 'u')}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
       const result = submitTmnfReplay(db, {
-        userId: req.user.id,
+        userId: req.user!.id,
         buffer: req.file.buffer,
         fileName: safeReplayName,
         explicitMapId,
@@ -721,7 +843,7 @@ app.post(
       fs.writeFileSync(path.join(replaysDir, safeReplayName), req.file.buffer);
       broadcastRealtimeEvent(
         'tmnf_replay',
-        `🏎️ ${req.user.display_name} a signé ${result.parsed.formattedTime} sur ${result.map.code}${result.deltaPoints > 0 ? ` (+${result.deltaPoints} pts)` : ''}`
+        `🏎️ ${req.user!.display_name} a signé ${result.parsed.formattedTime} sur ${result.map.code}${result.deltaPoints > 0 ? ` (+${result.deltaPoints} pts)` : ''}`
       );
       res.json({
         ok: true,
@@ -735,8 +857,8 @@ app.post(
         deltaPoints: result.deltaPoints,
         isPersonalBest: result.isPersonalBest,
       });
-    } catch (err: any) {
-      res.status(400).json({ error: err.message || 'Erreur lors de la lecture du fichier .Replay.gbx.' });
+    } catch (err: unknown) {
+      res.status(400).json({ error: errorMessage(err, 'Erreur lors de la lecture du fichier .Replay.gbx.') });
     }
   }
 );
@@ -753,15 +875,27 @@ app.post(
       return;
     }
 
-    const results: any[] = [];
+    const results: (
+      | {
+          fileName: string;
+          ok: true;
+          mapCode: string;
+          mapName: string;
+          formattedTime?: string;
+          medal: string;
+          deltaPoints: number;
+          isPersonalBest: boolean;
+        }
+      | { fileName: string; ok: false; error: string }
+    )[] = [];
     let totalDeltaPoints = 0;
     let validCount = 0;
     let errorCount = 0;
 
     for (const file of files) {
       try {
-        const safeReplayName = `${Date.now()}_${req.user.id}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
-        const out = submitTmnfReplay(db, { userId: req.user.id, buffer: file.buffer, fileName: safeReplayName });
+        const safeReplayName = `${Date.now()}_${safeFilename(req.user!.id, 'u')}_${crypto.randomBytes(3).toString('hex')}.Replay.gbx`;
+        const out = submitTmnfReplay(db, { userId: req.user!.id, buffer: file.buffer, fileName: safeReplayName });
         fs.writeFileSync(path.join(replaysDir, safeReplayName), file.buffer);
         validCount++;
         totalDeltaPoints += out.deltaPoints;
@@ -775,16 +909,16 @@ app.post(
           deltaPoints: out.deltaPoints,
           isPersonalBest: out.isPersonalBest,
         });
-      } catch (err: any) {
+      } catch (err: unknown) {
         errorCount++;
-        results.push({ fileName: file.originalname, ok: false, error: err.message || 'Fichier .gbx invalide.' });
+        results.push({ fileName: file.originalname, ok: false, error: errorMessage(err, 'Fichier .gbx invalide.') });
       }
     }
 
     if (validCount > 0) {
       broadcastRealtimeEvent(
         'tmnf_replay',
-        `🏎️ ${req.user.display_name} a validé ${validCount} replay(s) Trackmania${totalDeltaPoints > 0 ? ` (+${totalDeltaPoints} pts)` : ''} !`
+        `🏎️ ${req.user!.display_name} a validé ${validCount} replay(s) Trackmania${totalDeltaPoints > 0 ? ` (+${totalDeltaPoints} pts)` : ''} !`
       );
     }
 
@@ -792,16 +926,24 @@ app.post(
   }
 );
 
-app.get('/api/tmnf/map/:mapId/leaderboard', (req, res) => {
+app.get('/api/tmnf/map/:mapId/leaderboard', (req: AuthedRequest, res) => {
+  if (isDraftBlocked(req)) {
+    res.status(403).json({ error: 'L’édition est en cours de préparation.' });
+    return;
+  }
   try {
     const data = getFeaturedItemLeaderboard(db, String(req.params.mapId));
     res.json({ ok: true, ...data });
-  } catch (err: any) {
-    res.status(404).json({ error: err.message || 'Piste introuvable.' });
+  } catch (err: unknown) {
+    res.status(404).json({ error: errorMessage(err, 'Piste introuvable.') });
   }
 });
 
-app.get('/api/tmnf/map/:mapId/ghost/:userId', (req, res) => {
+app.get('/api/tmnf/map/:mapId/ghost/:userId', (req: AuthedRequest, res) => {
+  if (isDraftBlocked(req)) {
+    res.status(403).json({ error: 'L’édition est en cours de préparation.' });
+    return;
+  }
   try {
     const mapId = String(req.params.mapId);
     const userId = String(req.params.userId);
@@ -812,7 +954,7 @@ app.get('/api/tmnf/map/:mapId/ghost/:userId', (req, res) => {
       return;
     }
 
-    const downloadName = `Ghost_${data.map.code}_${entry.display_name.replace(/[^a-zA-Z0-9_-]/g, '')}_${entry.best_time_ms}ms.Replay.gbx`;
+    const downloadName = `Ghost_${safeFilename(data.map.code, 'map')}_${safeFilename(entry.display_name, 'driver')}_${entry.best_time_ms}ms.Replay.gbx`;
     if (entry.file_name) {
       const diskPath = path.join(replaysDir, path.basename(entry.file_name));
       if (fs.existsSync(diskPath)) {
@@ -833,8 +975,8 @@ app.get('/api/tmnf/map/:mapId/ghost/:userId', (req, res) => {
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
     res.send(buf);
-  } catch (err: any) {
-    res.status(404).json({ error: err.message || 'Ghost introuvable.' });
+  } catch (err: unknown) {
+    res.status(404).json({ error: errorMessage(err, 'Ghost introuvable.') });
   }
 });
 
@@ -842,7 +984,7 @@ app.post('/api/tmnf/webhook', (req: AuthedRequest, res) => {
   const configuredSecret = process.env.TMNF_WEBHOOK_SECRET?.trim();
   const headerSecret = String(req.headers['x-tmnf-secret'] || '');
   const isAdminSession = req.user?.is_admin === 1;
-  const secretOk = Boolean(configuredSecret) && headerSecret === configuredSecret;
+  const secretOk = Boolean(configuredSecret) && timingSafeEqualStr(headerSecret, configuredSecret!);
   if (!secretOk && !isAdminSession) {
     res.status(401).json({ error: 'Signature X-TMNF-Secret invalide ou absente.' });
     return;
@@ -864,8 +1006,8 @@ app.post('/api/tmnf/webhook', (req: AuthedRequest, res) => {
       );
     }
     res.json({ ok: true, ...out });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Erreur webhook TMNF.' });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err, 'Erreur webhook TMNF.') });
   }
 });
 
@@ -878,16 +1020,17 @@ app.get('/api/tmnf/sample-replay/:mapId', requireDevMode, requireAuth, (req: Aut
   }
   const baseMs = map.author_ms || 30000;
   const sampleTime = Math.max(5000, baseMs - Math.floor(Math.random() * 350) - 40);
-  const login = req.user.tmnf_login || req.user.username || 'hgw_pilot';
+  const login = req.user!.tmnf_login || req.user!.username || 'hgw_pilot';
   const buf = buildSampleReplayGbx({
     mapUid: map.uid || map.external_uid || map.id,
     bestTimeMs: sampleTime,
     playerLogin: login,
-    playerNickname: req.user.display_name,
-    nonce: `${Date.now()}_${req.user.id}`,
+    playerNickname: req.user!.display_name,
+    nonce: `${Date.now()}_${req.user!.id}`,
   });
+  const dlName = `${safeFilename(map.code, 'map')}_${safeFilename(login, 'pilot')}_${sampleTime}ms.Replay.gbx`;
   res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', `attachment; filename="${map.code}_${login}_${sampleTime}ms.Replay.gbx"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${dlName}"`);
   res.send(buf);
 });
 
@@ -896,25 +1039,41 @@ app.get('/api/tmnf/sample-replay/:mapId', requireDevMode, requireAuth, (req: Aut
 // ============================================================================
 
 app.post('/api/tournaments/:id/toggle', requireAuth, (req: AuthedRequest, res) => {
+  const cfg = getEventConfig(db);
+  if (cfg.effective_phase === 'draft' || cfg.effective_phase === 'closed') {
+    res.status(400).json({ error: 'Les inscriptions aux tournois sont fermées pour le moment.' });
+    return;
+  }
+
   const tournamentId = String(req.params.id);
-  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ? AND active = 1`).get(tournamentId);
+  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ? AND active = 1`).get(tournamentId) as
+    | TournamentRow
+    | undefined;
   if (!tournament) {
     res.status(404).json({ error: 'Tournoi introuvable.' });
     return;
   }
+  if (tournament.status === 'live' || tournament.status === 'completed') {
+    res.status(400).json({ error: 'Ce tournoi est déjà en cours ou terminé : les inscriptions sont verrouillées.' });
+    return;
+  }
 
   const existing = db
-    .prepare(`SELECT * FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`)
-    .get(tournamentId, req.user.id);
+    .prepare(`SELECT placement, points_awarded FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`)
+    .get(tournamentId, req.user!.id) as { placement: number | null; points_awarded: number } | undefined;
 
   if (existing) {
-    db.prepare(`DELETE FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`).run(tournamentId, req.user.id);
+    if (existing.placement !== null || existing.points_awarded > 0) {
+      res.status(400).json({ error: 'Impossible de se désinscrire : des résultats sont déjà enregistrés.' });
+      return;
+    }
+    db.prepare(`DELETE FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`).run(tournamentId, req.user!.id);
     broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true, registered: false });
   } else {
     db.prepare(`INSERT INTO tournament_registrations (tournament_id, user_id, pool, checked_in) VALUES (?, ?, 2, 0)`).run(
       tournamentId,
-      req.user.id
+      req.user!.id
     );
     broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true, registered: true });
@@ -938,7 +1097,7 @@ app.post('/api/admin/proofs/:id/review', requireAdmin, (req: AuthedRequest, res)
     const updated = reviewDailyAssignment(db, {
       assignmentId,
       action,
-      reviewerId: req.user.display_name,
+      reviewerId: req.user!.display_name,
       rejectReason,
     });
     broadcastRealtimeEvent(
@@ -946,8 +1105,8 @@ app.post('/api/admin/proofs/:id/review', requireAdmin, (req: AuthedRequest, res)
       action === 'approve' ? `✅ ${updated.display_name} a validé "${updated.title}" (+${updated.points} pts)` : undefined
     );
     res.json({ ok: true, assignment: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -964,7 +1123,7 @@ app.post('/api/admin/featured/submissions/:id/review', requireAdmin, (req: Authe
     const updated = reviewFeaturedSubmission(db, {
       submissionId,
       action,
-      reviewerId: req.user.display_name,
+      reviewerId: req.user!.display_name,
       rejectReason,
     });
     broadcastRealtimeEvent(
@@ -974,8 +1133,8 @@ app.post('/api/admin/featured/submissions/:id/review', requireAdmin, (req: Authe
         : undefined
     );
     res.json({ ok: true, submission: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -983,10 +1142,13 @@ app.post('/api/admin/featured/submissions/:id/review', requireAdmin, (req: Authe
 const handleConfigUpdate = (req: AuthedRequest, res: Response) => {
   try {
     const updated = updateEventConfig(db, req.body || {});
+    recalculateFeaturedLadder(db);
+    recalculateAllFeaturedStages(db);
+    recalculateAllRegularityBonuses(db);
     broadcastRealtimeEvent('settings_updated', '⚙️ Configuration de l’édition mise à jour !');
     res.json({ ok: true, eventSettings: updated, eventConfig: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 };
 app.post('/api/admin/settings', requireAdmin, handleConfigUpdate);
@@ -1001,10 +1163,11 @@ app.post('/api/admin/featured/config', requireAdmin, (req: AuthedRequest, res) =
   try {
     const updated = updateEventConfig(db, { featured: req.body || {} });
     recalculateFeaturedLadder(db);
+    recalculateAllFeaturedStages(db);
     broadcastRealtimeEvent('featured_updated', '⭐ Configuration du jeu vedette mise à jour !');
     res.json({ ok: true, featured: updated.featured, eventConfig: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1026,18 +1189,19 @@ app.post('/api/admin/featured/items', requireAdmin, (req: AuthedRequest, res) =>
     const item = createFeaturedItem(db, req.body || {});
     broadcastRealtimeEvent('featured_updated');
     res.json({ ok: true, item });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
 app.put('/api/admin/featured/items/:id', requireAdmin, (req: AuthedRequest, res) => {
   try {
     const item = updateFeaturedItem(db, String(req.params.id), req.body || {});
+    recalculateAllFeaturedStages(db);
     broadcastRealtimeEvent('featured_updated');
     res.json({ ok: true, item });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1046,8 +1210,8 @@ app.delete('/api/admin/featured/items/:id', requireAdmin, (req: AuthedRequest, r
     deleteFeaturedItem(db, String(req.params.id));
     broadcastRealtimeEvent('featured_updated');
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(409).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(409).json({ error: errorMessage(err) });
   }
 });
 
@@ -1057,8 +1221,8 @@ app.post('/api/admin/tournaments', requireAdmin, (req: AuthedRequest, res) => {
     const tournament = createTournament(db, req.body || {});
     broadcastRealtimeEvent('tournament_updated', `🏆 Nouveau tournoi ajouté : ${tournament.name}`);
     res.json({ ok: true, tournament });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1067,8 +1231,8 @@ app.put('/api/admin/tournaments/:id', requireAdmin, (req: AuthedRequest, res) =>
     const tournament = updateTournament(db, String(req.params.id), req.body || {});
     broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true, tournament });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1077,8 +1241,8 @@ app.delete('/api/admin/tournaments/:id', requireAdmin, (req: AuthedRequest, res)
     deleteTournament(db, String(req.params.id));
     broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(409).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(409).json({ error: errorMessage(err) });
   }
 });
 
@@ -1089,8 +1253,8 @@ app.post('/api/admin/tournaments/:id/player', requireAdmin, (req: AuthedRequest,
     updateTournamentPlayer(db, tournamentId, { userId: String(userId), pool, checkedIn, teamNumber, teamName });
     broadcastRealtimeEvent('tournament_updated');
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1103,8 +1267,8 @@ app.post('/api/admin/tournaments/:id/draw-teams', requireAdmin, async (req: Auth
     }
     broadcastRealtimeEvent('teams_drawn', `🎲 Les équipes de ${result.tournament.name} viennent d'être tirées au sort !`);
     res.json({ ok: true, ...result });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1114,40 +1278,44 @@ app.post('/api/admin/tournaments/:id/placements', requireAdmin, (req: AuthedRequ
     recordTournamentPlacements(db, String(req.params.id), placements);
     broadcastRealtimeEvent('points_updated', '🏆 Classement de tournoi mis à jour !');
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
 app.post('/api/admin/tournaments/:id/rounds', requireAdmin, (req: AuthedRequest, res) => {
   try {
     const tournamentId = String(req.params.id);
-    const rawScores = Array.isArray(req.body.scores) ? req.body.scores : [];
-    const normalized = rawScores.map((s: any) => ({
+    const rawScores = Array.isArray(req.body.scores)
+      ? (req.body.scores as { userId?: unknown; scores?: unknown; shows?: unknown }[])
+      : [];
+    const normalized = rawScores.map((s) => ({
       userId: String(s.userId),
-      scores: Array.isArray(s.scores) ? s.scores : Array.isArray(s.shows) ? s.shows : [],
+      scores: Array.isArray(s.scores) ? s.scores.map(Number) : Array.isArray(s.shows) ? s.shows.map(Number) : [],
     }));
     const updated = updateTournamentRoundScores(db, tournamentId, normalized);
     broadcastRealtimeEvent('points_updated', '🏆 Scores des manches mis à jour !');
     res.json({ ok: true, standings: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
 // Alias rétrocompatible Fall Guys
 app.post('/api/admin/fall-guys/scores', requireAdmin, (req: AuthedRequest, res) => {
   try {
-    const rawScores = Array.isArray(req.body.scores) ? req.body.scores : [];
+    const rawScores = Array.isArray(req.body.scores)
+      ? (req.body.scores as { userId?: unknown; shows?: unknown }[])
+      : [];
     const updated = updateTournamentRoundScores(
       db,
       'fall_guys',
-      rawScores.map((s: any) => ({ userId: String(s.userId), scores: Array.isArray(s.shows) ? s.shows : [] }))
+      rawScores.map((s) => ({ userId: String(s.userId), scores: Array.isArray(s.shows) ? s.shows.map(Number) : [] }))
     );
     broadcastRealtimeEvent('points_updated', '🫘 Scores Fall Guys mis à jour en direct !');
     res.json({ ok: true, standings: updated });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1160,8 +1328,8 @@ app.post('/api/admin/editions/archive', requireAdmin, (req: AuthedRequest, res) 
     });
     broadcastRealtimeEvent('settings_updated', `🏛️ Édition « ${out.name} » archivée dans le Hall of Fame !`);
     res.json({ ok: true, archive: out });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1174,10 +1342,12 @@ app.post('/api/admin/editions/new', requireAdmin, (req: AuthedRequest, res) => {
       keepTournaments: req.body?.keepTournaments !== false,
       keepFeaturedItems: req.body?.keepFeaturedItems !== false,
     });
+    for (const f of out.orphanProofFiles) unlinkQuietly(path.join(proofsDir, path.basename(f)));
+    for (const f of out.orphanReplayFiles) unlinkQuietly(path.join(replaysDir, path.basename(f)));
     broadcastRealtimeEvent('settings_updated', `🚀 Nouvelle édition « ${out.eventConfig.event_name} » créée en mode préparation.`);
-    res.json({ ok: true, ...out });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    res.json({ ok: true, archived: out.archived, eventConfig: out.eventConfig });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1186,30 +1356,43 @@ app.delete('/api/admin/editions/:id', requireAdmin, (req: AuthedRequest, res) =>
     deleteArchivedEdition(db, String(req.params.id));
     broadcastRealtimeEvent('settings_updated');
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(404).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(404).json({ error: errorMessage(err) });
   }
 });
 
-// Admin : Gestion des rôles Admin depuis l'UI
+// Admin : Gestion des rôles Admin depuis l'UI (atomique)
 app.post('/api/admin/users/:id/admin', requireAdmin, (req: AuthedRequest, res) => {
   const targetId = String(req.params.id);
   const nextAdmin = req.body?.isAdmin ? 1 : 0;
-  const target = db.prepare(`SELECT id, display_name, is_admin FROM users WHERE id = ?`).get(targetId) as any;
-  if (!target) {
-    res.status(404).json({ error: 'Utilisateur introuvable.' });
-    return;
-  }
-  if (nextAdmin === 0 && target.is_admin === 1) {
-    const adminsCount = (db.prepare(`SELECT COUNT(*) AS c FROM users WHERE is_admin = 1`).get() as { c: number }).c;
-    if (adminsCount <= 1) {
-      res.status(400).json({ error: 'Impossible de retirer les droits du dernier administrateur.' });
+
+  try {
+    const tx = db.transaction(() => {
+      const target = db.prepare(`SELECT id, display_name, is_admin FROM users WHERE id = ?`).get(targetId) as
+        | Pick<UserRow, 'id' | 'display_name' | 'is_admin'>
+        | undefined;
+      if (!target) {
+        return { status: 404 as const, error: 'Utilisateur introuvable.' };
+      }
+      if (nextAdmin === 0 && target.is_admin === 1) {
+        const adminsCount = (db.prepare(`SELECT COUNT(*) AS c FROM users WHERE is_admin = 1`).get() as { c: number }).c;
+        if (adminsCount <= 1) {
+          return { status: 400 as const, error: 'Impossible de retirer les droits du dernier administrateur.' };
+        }
+      }
+      db.prepare(`UPDATE users SET is_admin = ? WHERE id = ?`).run(nextAdmin, targetId);
+      return { status: 200 as const };
+    });
+    const out = tx();
+    if (out.status !== 200) {
+      res.status(out.status).json({ error: out.error });
       return;
     }
+    broadcastRealtimeEvent('profile_updated');
+    res.json({ ok: true, userId: targetId, is_admin: nextAdmin });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
-  db.prepare(`UPDATE users SET is_admin = ? WHERE id = ?`).run(nextAdmin, targetId);
-  broadcastRealtimeEvent('profile_updated');
-  res.json({ ok: true, userId: targetId, is_admin: nextAdmin });
 });
 
 app.post('/api/admin/cron/trigger', requireAdmin, (_req: AuthedRequest, res) => {
@@ -1233,8 +1416,8 @@ app.post('/api/admin/manual-points', requireAdmin, (req: AuthedRequest, res) => 
     });
     broadcastRealtimeEvent('points_updated', `🎁 Points bonus attribués (${points > 0 ? `+${points}` : points} pts) !`);
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1290,8 +1473,8 @@ function storeLogo(gameId: string, buf: Buffer): string {
   return `/uploads/logos/${name}`;
 }
 
-function setGameLogo(gameId: string, buf: Buffer): any {
-  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(gameId) as any;
+function setGameLogo(gameId: string, buf: Buffer): GameRow {
+  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(gameId) as GameRow | undefined;
   if (!game) throw new Error('Jeu introuvable.');
   const url = storeLogo(gameId, buf);
   const updated = updateGame(db, gameId, { logo_url: url });
@@ -1313,8 +1496,9 @@ app.get('/api/admin/catalog/export', requireAdmin, (req: AuthedRequest, res) => 
   const gameId = typeof req.query.gameId === 'string' && req.query.gameId.trim() ? req.query.gameId.trim() : undefined;
   const data = exportCatalog(db, gameId);
   const stamp = new Date().toISOString().slice(0, 10);
+  const safeId = gameId ? `-${safeFilename(gameId, 'game')}` : '';
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="hgw-catalog${gameId ? `-${gameId}` : ''}-${stamp}.json"`);
+  res.setHeader('Content-Disposition', `attachment; filename="hgw-catalog${safeId}-${stamp}.json"`);
   res.send(JSON.stringify(data, null, 2));
 });
 
@@ -1323,8 +1507,8 @@ app.post('/api/admin/catalog/import', requireAdmin, (req: AuthedRequest, res) =>
     const out = importCatalog(db, req.body || {});
     catalogChanged();
     res.json({ ok: true, ...out });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1333,8 +1517,8 @@ app.post('/api/admin/games', requireAdmin, (req: AuthedRequest, res) => {
     const game = createGame(db, req.body || {});
     catalogChanged();
     res.json({ ok: true, game });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1346,8 +1530,8 @@ app.put('/api/admin/games/:id', requireAdmin, (req: AuthedRequest, res) => {
     if (before && before.logo_url !== game.logo_url) removeLocalLogo(before.logo_url);
     catalogChanged();
     res.json({ ok: true, game });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1357,8 +1541,8 @@ app.delete('/api/admin/games/:id', requireAdmin, (req: AuthedRequest, res) => {
     removeLocalLogo(result.logo_url);
     catalogChanged();
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(409).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(409).json({ error: errorMessage(err) });
   }
 });
 
@@ -1368,12 +1552,16 @@ app.post('/api/admin/games/:id/logo', requireAdmin, logoUpload.single('logo'), (
     const game = setGameLogo(String(req.params.id), req.file.buffer);
     catalogChanged();
     res.json({ ok: true, game });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
-async function steamGridDb(pathname: string): Promise<any> {
+interface SteamGridDbResponse<T> {
+  data?: T[];
+}
+
+async function steamGridDb<T>(pathname: string): Promise<SteamGridDbResponse<T>> {
   let r: globalThis.Response;
   try {
     r = await fetch(`https://www.steamgriddb.com/api/v2${pathname}`, {
@@ -1386,7 +1574,7 @@ async function steamGridDb(pathname: string): Promise<any> {
   if (r.status === 401 || r.status === 403) throw new Error('Clé SteamGridDB refusée : vérifie STEAMGRIDDB_API_KEY.');
   if (r.status === 404) return { data: [] };
   if (!r.ok) throw new Error(`SteamGridDB indisponible (HTTP ${r.status}).`);
-  return r.json();
+  return (await r.json()) as SteamGridDbResponse<T>;
 }
 
 function requireLogoSearch(_req: Request, res: Response, next: NextFunction): void {
@@ -1404,16 +1592,18 @@ app.get('/api/admin/logo-search', requireAdmin, requireLogoSearch, async (req: A
       res.json({ results: [] });
       return;
     }
-    const data = await steamGridDb(`/search/autocomplete/${encodeURIComponent(q)}`);
-    const results = (data.data || []).slice(0, 8).map((g: any) => ({
+    const data = await steamGridDb<{ id: number; name: string; release_date?: number; verified?: boolean }>(
+      `/search/autocomplete/${encodeURIComponent(q)}`
+    );
+    const results = (data.data || []).slice(0, 8).map((g) => ({
       id: g.id,
       name: g.name,
       year: g.release_date ? new Date(g.release_date * 1000).getFullYear() : null,
       verified: Boolean(g.verified),
     }));
     res.json({ results });
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(502).json({ error: errorMessage(err) });
   }
 });
 
@@ -1422,14 +1612,16 @@ app.get('/api/admin/logo-search/:sgdbId/images', requireAdmin, requireLogoSearch
     const sgdbId = Number.parseInt(String(req.params.sgdbId), 10);
     if (!Number.isFinite(sgdbId)) throw new Error('Identifiant invalide.');
     const type = req.query.type === 'logos' ? 'logos' : 'icons';
-    const data = await steamGridDb(`/${type}/game/${sgdbId}?nsfw=false&humor=false`);
+    const data = await steamGridDb<{ id: number; url: string; thumb: string; width: number; height: number; mime: string }>(
+      `/${type}/game/${sgdbId}?nsfw=false&humor=false`
+    );
     const images = (data.data || [])
-      .filter((i: any) => ['image/png', 'image/jpeg', 'image/webp'].includes(i.mime))
+      .filter((i) => ['image/png', 'image/jpeg', 'image/webp'].includes(i.mime))
       .slice(0, 24)
-      .map((i: any) => ({ id: i.id, url: i.url, thumb: i.thumb, width: i.width, height: i.height }));
+      .map((i) => ({ id: i.id, url: i.url, thumb: i.thumb, width: i.width, height: i.height }));
     res.json({ images });
-  } catch (err: any) {
-    res.status(502).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(502).json({ error: errorMessage(err) });
   }
 });
 
@@ -1452,8 +1644,8 @@ app.post('/api/admin/games/:id/logo-import', requireAdmin, requireLogoSearch, as
     const game = setGameLogo(String(req.params.id), buf);
     catalogChanged();
     res.json({ ok: true, game });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1462,8 +1654,8 @@ app.post('/api/admin/quests', requireAdmin, (req: AuthedRequest, res) => {
     const quest = createQuest(db, req.body || {});
     catalogChanged();
     res.json({ ok: true, quest });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1472,8 +1664,8 @@ app.put('/api/admin/quests/:id', requireAdmin, (req: AuthedRequest, res) => {
     const quest = updateQuest(db, String(req.params.id), req.body || {});
     catalogChanged();
     res.json({ ok: true, quest });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: errorMessage(err) });
   }
 });
 
@@ -1482,26 +1674,25 @@ app.delete('/api/admin/quests/:id', requireAdmin, (req: AuthedRequest, res) => {
     deleteQuest(db, String(req.params.id));
     catalogChanged();
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(409).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(409).json({ error: errorMessage(err) });
   }
 });
 
 // Sauvegardes & Export JSON
 app.get('/api/admin/backup/sqlite', requireAdmin, async (_req: AuthedRequest, res) => {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const tmpBackupPath = path.join(replaysDir, `hgw-backup-${stamp}.sqlite`);
   try {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const tmpBackupPath = path.join(replaysDir, `hgw-backup-${stamp}.sqlite`);
     await db.backup(tmpBackupPath);
     const fileBuf = fs.readFileSync(tmpBackupPath);
-    try {
-      fs.unlinkSync(tmpBackupPath);
-    } catch {}
+    unlinkQuietly(tmpBackupPath);
     res.setHeader('Content-Type', 'application/x-sqlite3');
     res.setHeader('Content-Disposition', `attachment; filename="hgw-backup-${stamp.slice(0, 10)}.sqlite"`);
     res.send(fileBuf);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Erreur lors de la sauvegarde SQLite.' });
+  } catch (err: unknown) {
+    unlinkQuietly(tmpBackupPath);
+    res.status(500).json({ error: errorMessage(err, 'Erreur lors de la sauvegarde SQLite.') });
   }
 });
 
@@ -1570,8 +1761,8 @@ app.post('/api/admin/seed-demo', requireDevMode, requireAdmin, (_req: AuthedRequ
           reviewDailyAssignment(db, { assignmentId: quests[0].id, action: 'approve', reviewerId: 'Hextaz (AutoDemo)' });
         }
       }
-    } catch {
-      // ignorer si catalogue personnalisé
+    } catch (err: unknown) {
+      console.warn(`ℹ️ [seed-demo] Quêtes ignorées pour ${p.name}:`, errorMessage(err));
     }
 
     for (const t of activeTournaments) {
@@ -1618,8 +1809,8 @@ app.post('/api/admin/seed-demo', requireDevMode, requireAdmin, (_req: AuthedRequ
           });
           submitTmnfReplay(db, { userId: p.id, buffer: bufWeekly, fileName: `${p.name}_weekly.Replay.gbx` });
         }
-      } catch {
-        // ignorer si phase fermée
+      } catch (err: unknown) {
+        console.warn(`ℹ️ [seed-demo] Replays ignorés pour ${p.name}:`, errorMessage(err));
       }
     }
   }
@@ -1628,7 +1819,9 @@ app.post('/api/admin/seed-demo', requireDevMode, requireAdmin, (_req: AuthedRequ
   if (teamTourney) {
     try {
       generateBalancedTeams(db, teamTourney.id, true);
-    } catch {}
+    } catch (err: unknown) {
+      console.warn('ℹ️ [seed-demo] Tirage d’équipes ignoré:', errorMessage(err));
+    }
   }
 
   res.json({ ok: true, message: '12 joueurs de démo, preuves et inscriptions générés !' });

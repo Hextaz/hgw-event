@@ -182,6 +182,70 @@ function normalizeStatusMode(raw?: string): StatusMode {
   return valid.includes(raw as StatusMode) ? (raw as StatusMode) : 'auto';
 }
 
+export function isPlayablePhase(phase: EffectivePhase): boolean {
+  return phase === 'act_1' || phase === 'act_2' || phase === 'act_3';
+}
+
+/**
+ * Valide une URL de preuve joueur (`https://` ou `http://` uniquement, refuse `javascript:`, `data:`, etc.).
+ */
+export function normalizeProofUrl(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const s = String(raw).trim();
+  if (!s) return undefined;
+  if (s.length > 500) throw new Error('Le lien de preuve ne doit pas dépasser 500 caractères.');
+  let parsed: URL;
+  try {
+    parsed = new URL(s);
+  } catch {
+    throw new Error('Lien de preuve invalide (utilisez une URL commençant par https:// ou http://).');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('Seuls les liens https:// ou http:// sont acceptés pour les preuves.');
+  }
+  return parsed.toString();
+}
+
+/**
+ * Valide un lien de serveur (`https://`, `http://` ou `tmtp://` uniquement).
+ */
+export function normalizeJoinUrl(raw: unknown): string {
+  if (raw === undefined || raw === null) return '';
+  const s = String(raw).trim();
+  if (!s) return '';
+  if (s.length > 240) throw new Error('Le lien Rejoindre ne doit pas dépasser 240 caractères.');
+  let parsed: URL;
+  try {
+    parsed = new URL(s);
+  } catch {
+    throw new Error('Lien Rejoindre invalide (utilisez https://, http:// ou tmtp://).');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:' && parsed.protocol !== 'tmtp:') {
+    throw new Error('Le lien Rejoindre doit utiliser le protocole https://, http:// ou tmtp://.');
+  }
+  return s;
+}
+
+function safeJoinUrlRead(raw: unknown): string {
+  try {
+    return normalizeJoinUrl(raw);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Retourne les bornes `day_key` (`YYYY-MM-DD`) de l'acte courant pour appliquer le cap par jeu et par acte.
+ */
+export function getCurrentActDayBounds(cfg: EventConfig): { startDayKey: string | null; endDayKey: string | null } {
+  const idx = Math.max(1, Math.min(cfg.acts.length, cfg.current_act)) - 1;
+  const cur = cfg.acts[idx];
+  const next = cfg.acts[idx + 1];
+  const startDayKey = cur?.start_at && /^\d{4}-\d{2}-\d{2}/.test(cur.start_at) ? cur.start_at.slice(0, 10) : null;
+  const endDayKey = next?.start_at && /^\d{4}-\d{2}-\d{2}/.test(next.start_at) ? next.start_at.slice(0, 10) : null;
+  return { startDayKey, endDayKey };
+}
+
 export function getEventConfig(db: Database.Database, now: Date = new Date()): EventConfig {
   const rows = db.prepare(`SELECT key, value FROM event_settings`).all() as { key: string; value: string }[];
   const map = new Map(rows.map((r) => [r.key, r.value]));
@@ -292,7 +356,7 @@ export function getEventConfig(db: Database.Database, now: Date = new Date()): E
       enabled: rawFeat.server_info?.enabled !== undefined ? Boolean(rawFeat.server_info.enabled) : connector === 'tmnf_gbx',
       label: String(rawFeat.server_info?.label || baseFeatured.server_info.label).trim().slice(0, 60),
       address: String(rawFeat.server_info?.address ?? legacyPlayit ?? baseFeatured.server_info.address).trim().slice(0, 160),
-      join_url: String(rawFeat.server_info?.join_url ?? legacyJoin ?? baseFeatured.server_info.join_url).trim().slice(0, 240),
+      join_url: safeJoinUrlRead(rawFeat.server_info?.join_url ?? legacyJoin ?? baseFeatured.server_info.join_url),
       login: String(rawFeat.server_info?.login ?? legacyLogin ?? baseFeatured.server_info.login).trim().slice(0, 80),
       help_text: String(rawFeat.server_info?.help_text ?? baseFeatured.server_info.help_text).trim().slice(0, 300),
     },
@@ -330,7 +394,7 @@ export function getEventConfig(db: Database.Database, now: Date = new Date()): E
           activeIdx = act.index;
         }
       }
-      effectivePhase = (`act_${activeIdx}` as EffectivePhase);
+      effectivePhase = `act_${activeIdx}` as EffectivePhase;
     }
   }
 
@@ -341,14 +405,14 @@ export function getEventConfig(db: Database.Database, now: Date = new Date()): E
 
   const cutoffMs = Date.parse(featured.ladder_cutoff_at);
   const cutoffPassed = statusMode === 'auto' && Number.isFinite(cutoffMs) && nowMs >= cutoffMs;
-  const inPlayablePhase = effectivePhase === 'act_1' || effectivePhase === 'act_2' || effectivePhase === 'act_3';
+  const inPlayablePhase = isPlayablePhase(effectivePhase);
   const ladderUnlocked = featured.enabled && featured.ladder_enabled && inPlayablePhase && currentAct >= featured.ladder_unlock_act && !cutoffPassed;
   const ladderLocked = effectivePhase === 'closed' || cutoffPassed;
 
   return {
     event_name: eventName,
     event_subtitle: eventSubtitle,
-    prizes: prizes.length >= 3 ? prizes.slice(0, 5) : ['Carte cadeau 10 €', 'Discord Nitro', 'Abonnement Twitch'],
+    prizes: Array.isArray(prizes) && prizes.length >= 1 ? prizes.slice(0, 5) : ['Carte cadeau 10 €', 'Discord Nitro', 'Abonnement Twitch'],
     tombola_prize: tombolaPrize,
     tombola_threshold: tombolaThreshold,
     status_mode: statusMode,
@@ -408,7 +472,10 @@ export interface EventConfigPatch {
   weekly_map_uid?: string;
 }
 
-export function updateEventConfig(db: Database.Database, patch: EventConfigPatch): EventConfig {
+/**
+ * Applique un patch de configuration sans ouvrir de transaction autonome (utilisable dans une transaction appelante).
+ */
+export function applyEventConfigPatch(db: Database.Database, patch: EventConfigPatch): void {
   const current = getEventConfig(db);
   const upsert = db.prepare(`
     INSERT INTO event_settings (key, value, updated_at)
@@ -416,173 +483,251 @@ export function updateEventConfig(db: Database.Database, patch: EventConfigPatch
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
   `);
 
+  if (typeof patch.event_name === 'string' && patch.event_name.trim()) {
+    upsert.run('event_name', patch.event_name.trim().slice(0, 100));
+  }
+  if (typeof patch.event_subtitle === 'string') {
+    upsert.run('event_subtitle', patch.event_subtitle.trim().slice(0, 260));
+  }
+  if (Array.isArray(patch.prizes)) {
+    const cleaned = patch.prizes.map((p) => String(p || '').trim().slice(0, 80)).filter(Boolean);
+    if (cleaned.length >= 1) {
+      upsert.run('prizes_json', JSON.stringify(cleaned));
+    }
+  }
+  if (typeof patch.tombola_prize === 'string') {
+    upsert.run('tombola_prize', patch.tombola_prize.trim().slice(0, 100));
+  }
+  if (patch.tombola_threshold !== undefined) {
+    upsert.run('tombola_threshold', String(clampInt(patch.tombola_threshold, current.tombola_threshold, 1, 100000)));
+  }
+  if (typeof patch.status_mode === 'string' && patch.status_mode.trim()) {
+    upsert.run('status_mode', normalizeStatusMode(patch.status_mode.trim()));
+  }
+
+  // Actes & dates
+  const nextActsCount =
+    patch.acts_count !== undefined
+      ? (clampInt(patch.acts_count, current.acts_count, 1, 3) as 1 | 2 | 3)
+      : current.acts_count;
+  let nextActs: EventAct[] = current.acts.map((a) => ({ ...a }));
+  if (Array.isArray(patch.acts) && patch.acts.length > 0) {
+    nextActs = [];
+    for (let i = 1; i <= nextActsCount; i++) {
+      const src = patch.acts.find((a) => Number(a?.index) === i) || patch.acts[i - 1] || current.acts[i - 1];
+      nextActs.push({
+        index: i,
+        name: String(src?.name || `Acte ${['I', 'II', 'III'][i - 1]}`).trim().slice(0, 40),
+        start_at: String(src?.start_at || current.acts[i - 1]?.start_at || current.start_at).trim(),
+      });
+    }
+  } else {
+    while (nextActs.length < nextActsCount) {
+      const idx = nextActs.length + 1;
+      nextActs.push({
+        index: idx,
+        name: `Acte ${['I', 'II', 'III'][idx - 1]}`,
+        start_at: current.acts[idx - 1]?.start_at || current.week2_start_at,
+      });
+    }
+    nextActs = nextActs.slice(0, nextActsCount);
+  }
+  if (typeof patch.start_at === 'string' && patch.start_at.trim()) {
+    nextActs[0].start_at = patch.start_at.trim();
+  }
+  if (typeof patch.week2_start_at === 'string' && patch.week2_start_at.trim() && nextActs[1]) {
+    nextActs[1].start_at = patch.week2_start_at.trim();
+  }
+
+  upsert.run('acts_count', String(nextActsCount));
+  upsert.run('acts_json', JSON.stringify(nextActs));
+  upsert.run('start_at', nextActs[0].start_at);
+  if (nextActs[1]) upsert.run('week2_start_at', nextActs[1].start_at);
+
+  if (typeof patch.end_at === 'string' && patch.end_at.trim()) {
+    upsert.run('end_at', patch.end_at.trim());
+  }
+
+  // Règles défis
+  if (patch.min_selected_games !== undefined) {
+    upsert.run('min_selected_games', String(clampInt(patch.min_selected_games, current.min_selected_games, 1, 20)));
+  }
+  if (patch.max_quests_per_game_per_act !== undefined) {
+    upsert.run(
+      'max_quests_per_game_per_act',
+      String(clampInt(patch.max_quests_per_game_per_act, current.max_quests_per_game_per_act, 1, 50))
+    );
+  }
+  if (patch.daily_quests_count !== undefined) {
+    upsert.run('daily_quests_count', String(clampInt(patch.daily_quests_count, current.daily_quests_count, 1, 6)));
+  }
+  if (patch.daily_rerolls_max !== undefined) {
+    upsert.run('daily_rerolls_max', String(clampInt(patch.daily_rerolls_max, current.daily_rerolls_max, 0, 5)));
+  }
+  if (patch.quest_points) {
+    const nextQp = {
+      easy: clampInt(patch.quest_points.easy, current.quest_points.easy, 1, 1000),
+      medium: clampInt(patch.quest_points.medium, current.quest_points.medium, 1, 1000),
+      hard: clampInt(patch.quest_points.hard, current.quest_points.hard, 1, 1000),
+    };
+    upsert.run('quest_points_json', JSON.stringify(nextQp));
+    // Mettre à jour les points des quêtes du catalogue selon le nouveau barème
+    db.prepare(`UPDATE quests SET points = ? WHERE difficulty = 'easy'`).run(nextQp.easy);
+    db.prepare(`UPDATE quests SET points = ? WHERE difficulty = 'medium'`).run(nextQp.medium);
+    db.prepare(`UPDATE quests SET points = ? WHERE difficulty = 'hard'`).run(nextQp.hard);
+  }
+  if (Array.isArray(patch.regularity_tiers)) {
+    const cleaned = patch.regularity_tiers
+      .filter((t) => Number(t?.days) > 0 && Number(t?.points) > 0)
+      .map((t) => ({
+        days: clampInt(t.days, 1, 1, 90),
+        points: clampInt(t.points, 10, 1, 5000),
+        label: String(t.label || `Palier Régularité — ${clampInt(t.days, 1, 1, 90)} Jours Actifs`).trim().slice(0, 100),
+      }))
+      .sort((a, b) => a.days - b.days);
+    upsert.run('regularity_tiers_json', JSON.stringify(cleaned));
+  }
+  if (patch.default_tournament_scale && typeof patch.default_tournament_scale === 'object') {
+    const scale: Record<string, number> = {};
+    for (const [k, v] of Object.entries(patch.default_tournament_scale)) {
+      if (/^(\d+|default)$/.test(k)) {
+        scale[k] = clampInt(v, 0, 0, 10000);
+      }
+    }
+    if (Object.keys(scale).length > 0) {
+      upsert.run('default_tournament_scale_json', JSON.stringify(scale));
+    }
+  }
+
+  // Jeu Vedette (fusion propre + validation des URLs + champs legacy TMNF)
+  const hasFeaturedUpdate =
+    patch.featured !== undefined ||
+    patch.tmnf_cutoff_at !== undefined ||
+    patch.tmnf_playit_address !== undefined ||
+    patch.tmnf_join_url !== undefined ||
+    patch.tmnf_server_login !== undefined;
+
+  if (hasFeaturedUpdate) {
+    const f = patch.featured || {};
+    const nextConnector: FeaturedConnector =
+      f.connector !== undefined ? (f.connector === 'standard' ? 'standard' : 'tmnf_gbx') : current.featured.connector;
+    const nextMetricType: MetricType =
+      nextConnector === 'tmnf_gbx'
+        ? 'time_asc'
+        : f.metric_type === 'time_asc' || f.metric_type === 'score_desc' || f.metric_type === 'binary'
+        ? f.metric_type
+        : current.featured.metric_type;
+
+    const rawJoinUrl =
+      typeof patch.tmnf_join_url === 'string'
+        ? patch.tmnf_join_url
+        : f.server_info?.join_url !== undefined
+        ? f.server_info.join_url
+        : current.featured.server_info.join_url;
+    const validatedJoinUrl = normalizeJoinUrl(rawJoinUrl);
+
+    const nextTiers: FeaturedTier[] = Array.isArray(f.tiers)
+      ? f.tiers
+          .filter((t) => t && String(t.key || '').trim() !== '')
+          .map((t) => ({
+            key: String(t.key).trim().toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+            label: String(t.label || t.key).trim().slice(0, 40),
+            points: clampInt(t.points, 10, 0, 10000),
+          }))
+      : current.featured.tiers;
+
+    const nextLadderScale = Array.isArray(f.ladder_points_scale)
+      ? f.ladder_points_scale.map((n) => clampInt(n, 0, 0, 10000))
+      : current.featured.ladder_points_scale;
+
+    const merged: FeaturedConfig = {
+      enabled: f.enabled !== undefined ? Boolean(f.enabled) : current.featured.enabled,
+      title: f.title !== undefined ? String(f.title).trim().slice(0, 60) || current.featured.title : current.featured.title,
+      subtitle: f.subtitle !== undefined ? String(f.subtitle).trim().slice(0, 260) : current.featured.subtitle,
+      game_id: f.game_id !== undefined ? (f.game_id ? String(f.game_id).trim().slice(0, 60) : null) : current.featured.game_id,
+      connector: nextConnector,
+      metric_type: nextMetricType,
+      metric_unit: f.metric_unit !== undefined ? String(f.metric_unit).trim().slice(0, 20) : current.featured.metric_unit,
+      stages_enabled: f.stages_enabled !== undefined ? Boolean(f.stages_enabled) : current.featured.stages_enabled,
+      stages_title:
+        f.stages_title !== undefined
+          ? String(f.stages_title).trim().slice(0, 60) || current.featured.stages_title
+          : current.featured.stages_title,
+      tiers: nextTiers.length > 0 ? nextTiers : current.featured.tiers,
+      ladder_enabled: f.ladder_enabled !== undefined ? Boolean(f.ladder_enabled) : current.featured.ladder_enabled,
+      ladder_title:
+        f.ladder_title !== undefined
+          ? String(f.ladder_title).trim().slice(0, 60) || current.featured.ladder_title
+          : current.featured.ladder_title,
+      ladder_unlock_act: clampInt(
+        f.ladder_unlock_act ?? current.featured.ladder_unlock_act,
+        Math.min(2, nextActsCount),
+        1,
+        nextActsCount
+      ),
+      ladder_cutoff_at:
+        typeof patch.tmnf_cutoff_at === 'string' && patch.tmnf_cutoff_at.trim()
+          ? patch.tmnf_cutoff_at.trim()
+          : f.ladder_cutoff_at !== undefined
+          ? String(f.ladder_cutoff_at).trim()
+          : current.featured.ladder_cutoff_at,
+      ladder_points_scale: nextLadderScale.length > 0 ? nextLadderScale : current.featured.ladder_points_scale,
+      server_info: {
+        enabled: f.server_info?.enabled !== undefined ? Boolean(f.server_info.enabled) : current.featured.server_info.enabled,
+        label:
+          f.server_info?.label !== undefined
+            ? String(f.server_info.label).trim().slice(0, 60)
+            : current.featured.server_info.label,
+        address:
+          typeof patch.tmnf_playit_address === 'string' && patch.tmnf_playit_address.trim()
+            ? patch.tmnf_playit_address.trim().slice(0, 160)
+            : f.server_info?.address !== undefined
+            ? String(f.server_info.address).trim().slice(0, 160)
+            : current.featured.server_info.address,
+        join_url: validatedJoinUrl,
+        login:
+          typeof patch.tmnf_server_login === 'string' && patch.tmnf_server_login.trim()
+            ? patch.tmnf_server_login.trim().slice(0, 80)
+            : f.server_info?.login !== undefined
+            ? String(f.server_info.login).trim().slice(0, 80)
+            : current.featured.server_info.login,
+        help_text:
+          f.server_info?.help_text !== undefined
+            ? String(f.server_info.help_text).trim().slice(0, 300)
+            : current.featured.server_info.help_text,
+      },
+    };
+
+    if (typeof patch.tmnf_cutoff_at === 'string' && patch.tmnf_cutoff_at.trim()) {
+      upsert.run('tmnf_cutoff_at', merged.ladder_cutoff_at);
+    }
+    if (typeof patch.tmnf_playit_address === 'string' && patch.tmnf_playit_address.trim()) {
+      upsert.run('tmnf_playit_address', merged.server_info.address);
+    }
+    if (typeof patch.tmnf_join_url === 'string' && patch.tmnf_join_url.trim()) {
+      upsert.run('tmnf_join_url', merged.server_info.join_url);
+    }
+    if (typeof patch.tmnf_server_login === 'string' && patch.tmnf_server_login.trim()) {
+      upsert.run('tmnf_server_login', merged.server_info.login);
+    }
+    upsert.run('featured_config_json', JSON.stringify(merged));
+  }
+
+  if (typeof patch.weekly_map_uid === 'string' && patch.weekly_map_uid.trim() !== '') {
+    const uid = patch.weekly_map_uid.trim();
+    db.prepare(`UPDATE featured_items SET external_uid = ? WHERE is_ladder = 1`).run(uid);
+    // Maintenir la table legacy si présente
+    const hasLegacy = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tmnf_maps'`).get();
+    if (hasLegacy) {
+      db.prepare(`UPDATE tmnf_maps SET uid = ? WHERE is_weekly = 1`).run(uid);
+    }
+  }
+}
+
+export function updateEventConfig(db: Database.Database, patch: EventConfigPatch): EventConfig {
   const tx = db.transaction(() => {
-    if (typeof patch.event_name === 'string' && patch.event_name.trim()) {
-      upsert.run('event_name', patch.event_name.trim().slice(0, 100));
-    }
-    if (typeof patch.event_subtitle === 'string') {
-      upsert.run('event_subtitle', patch.event_subtitle.trim().slice(0, 260));
-    }
-    if (Array.isArray(patch.prizes)) {
-      const cleaned = patch.prizes.map((p) => String(p || '').trim().slice(0, 80)).filter(Boolean);
-      if (cleaned.length >= 1) {
-        upsert.run('prizes_json', JSON.stringify(cleaned));
-      }
-    }
-    if (typeof patch.tombola_prize === 'string') {
-      upsert.run('tombola_prize', patch.tombola_prize.trim().slice(0, 100));
-    }
-    if (patch.tombola_threshold !== undefined) {
-      upsert.run('tombola_threshold', String(clampInt(patch.tombola_threshold, current.tombola_threshold, 1, 100000)));
-    }
-    if (typeof patch.status_mode === 'string' && patch.status_mode.trim()) {
-      upsert.run('status_mode', normalizeStatusMode(patch.status_mode.trim()));
-    }
-
-    // Actes & dates
-    const nextActsCount =
-      patch.acts_count !== undefined
-        ? (clampInt(patch.acts_count, current.acts_count, 1, 3) as 1 | 2 | 3)
-        : current.acts_count;
-    let nextActs: EventAct[] = current.acts.map((a) => ({ ...a }));
-    if (Array.isArray(patch.acts) && patch.acts.length > 0) {
-      nextActs = [];
-      for (let i = 1; i <= nextActsCount; i++) {
-        const src = patch.acts.find((a) => Number(a?.index) === i) || patch.acts[i - 1] || current.acts[i - 1];
-        nextActs.push({
-          index: i,
-          name: String(src?.name || `Acte ${['I', 'II', 'III'][i - 1]}`).trim().slice(0, 40),
-          start_at: String(src?.start_at || current.acts[i - 1]?.start_at || current.start_at).trim(),
-        });
-      }
-    } else {
-      while (nextActs.length < nextActsCount) {
-        const idx = nextActs.length + 1;
-        nextActs.push({
-          index: idx,
-          name: `Acte ${['I', 'II', 'III'][idx - 1]}`,
-          start_at: current.acts[idx - 1]?.start_at || current.week2_start_at,
-        });
-      }
-      nextActs = nextActs.slice(0, nextActsCount);
-    }
-    if (typeof patch.start_at === 'string' && patch.start_at.trim()) {
-      nextActs[0].start_at = patch.start_at.trim();
-    }
-    if (typeof patch.week2_start_at === 'string' && patch.week2_start_at.trim() && nextActs[1]) {
-      nextActs[1].start_at = patch.week2_start_at.trim();
-    }
-
-    upsert.run('acts_count', String(nextActsCount));
-    upsert.run('acts_json', JSON.stringify(nextActs));
-    upsert.run('start_at', nextActs[0].start_at);
-    if (nextActs[1]) upsert.run('week2_start_at', nextActs[1].start_at);
-
-    if (typeof patch.end_at === 'string' && patch.end_at.trim()) {
-      upsert.run('end_at', patch.end_at.trim());
-    }
-
-    // Règles défis
-    if (patch.min_selected_games !== undefined) {
-      upsert.run('min_selected_games', String(clampInt(patch.min_selected_games, current.min_selected_games, 1, 20)));
-    }
-    if (patch.max_quests_per_game_per_act !== undefined) {
-      upsert.run(
-        'max_quests_per_game_per_act',
-        String(clampInt(patch.max_quests_per_game_per_act, current.max_quests_per_game_per_act, 1, 50))
-      );
-    }
-    if (patch.daily_quests_count !== undefined) {
-      upsert.run('daily_quests_count', String(clampInt(patch.daily_quests_count, current.daily_quests_count, 1, 6)));
-    }
-    if (patch.daily_rerolls_max !== undefined) {
-      upsert.run('daily_rerolls_max', String(clampInt(patch.daily_rerolls_max, current.daily_rerolls_max, 0, 5)));
-    }
-    if (patch.quest_points) {
-      const nextQp = {
-        easy: clampInt(patch.quest_points.easy, current.quest_points.easy, 1, 1000),
-        medium: clampInt(patch.quest_points.medium, current.quest_points.medium, 1, 1000),
-        hard: clampInt(patch.quest_points.hard, current.quest_points.hard, 1, 1000),
-      };
-      upsert.run('quest_points_json', JSON.stringify(nextQp));
-      // Mettre à jour les points des quêtes du catalogue selon le nouveau barème
-      db.prepare(`UPDATE quests SET points = ? WHERE difficulty = 'easy'`).run(nextQp.easy);
-      db.prepare(`UPDATE quests SET points = ? WHERE difficulty = 'medium'`).run(nextQp.medium);
-      db.prepare(`UPDATE quests SET points = ? WHERE difficulty = 'hard'`).run(nextQp.hard);
-    }
-    if (Array.isArray(patch.regularity_tiers)) {
-      const cleaned = patch.regularity_tiers
-        .filter((t) => Number(t?.days) > 0 && Number(t?.points) > 0)
-        .map((t) => ({
-          days: clampInt(t.days, 1, 1, 90),
-          points: clampInt(t.points, 10, 1, 5000),
-          label: String(t.label || `Palier Régularité — ${clampInt(t.days, 1, 1, 90)} Jours Actifs`).trim().slice(0, 100),
-        }))
-        .sort((a, b) => a.days - b.days);
-      upsert.run('regularity_tiers_json', JSON.stringify(cleaned));
-    }
-    if (patch.default_tournament_scale && typeof patch.default_tournament_scale === 'object') {
-      const scale: Record<string, number> = {};
-      for (const [k, v] of Object.entries(patch.default_tournament_scale)) {
-        if (/^(\d+|default)$/.test(k)) {
-          scale[k] = clampInt(v, 0, 0, 10000);
-        }
-      }
-      if (Object.keys(scale).length > 0) {
-        upsert.run('default_tournament_scale_json', JSON.stringify(scale));
-      }
-    }
-
-    // Jeu Vedette (fusion propre + champs legacy TMNF)
-    const hasFeaturedUpdate =
-      patch.featured !== undefined ||
-      patch.tmnf_cutoff_at !== undefined ||
-      patch.tmnf_playit_address !== undefined ||
-      patch.tmnf_join_url !== undefined ||
-      patch.tmnf_server_login !== undefined;
-
-    if (hasFeaturedUpdate) {
-      const f = patch.featured || {};
-      const merged: FeaturedConfig = {
-        ...current.featured,
-        ...f,
-        server_info: {
-          ...current.featured.server_info,
-          ...(f.server_info || {}),
-        },
-      };
-      if (typeof patch.tmnf_cutoff_at === 'string' && patch.tmnf_cutoff_at.trim()) {
-        merged.ladder_cutoff_at = patch.tmnf_cutoff_at.trim();
-        upsert.run('tmnf_cutoff_at', merged.ladder_cutoff_at);
-      }
-      if (typeof patch.tmnf_playit_address === 'string' && patch.tmnf_playit_address.trim()) {
-        merged.server_info.address = patch.tmnf_playit_address.trim();
-        upsert.run('tmnf_playit_address', merged.server_info.address);
-      }
-      if (typeof patch.tmnf_join_url === 'string' && patch.tmnf_join_url.trim()) {
-        merged.server_info.join_url = patch.tmnf_join_url.trim();
-        upsert.run('tmnf_join_url', merged.server_info.join_url);
-      }
-      if (typeof patch.tmnf_server_login === 'string' && patch.tmnf_server_login.trim()) {
-        merged.server_info.login = patch.tmnf_server_login.trim();
-        upsert.run('tmnf_server_login', merged.server_info.login);
-      }
-      merged.ladder_unlock_act = clampInt(merged.ladder_unlock_act, Math.min(2, nextActsCount), 1, nextActsCount);
-      upsert.run('featured_config_json', JSON.stringify(merged));
-    }
-
-    if (typeof patch.weekly_map_uid === 'string' && patch.weekly_map_uid.trim() !== '') {
-      const uid = patch.weekly_map_uid.trim();
-      db.prepare(`UPDATE featured_items SET external_uid = ? WHERE is_ladder = 1`).run(uid);
-      // Maintenir la table legacy si présente
-      try {
-        db.prepare(`UPDATE tmnf_maps SET uid = ? WHERE is_weekly = 1`).run(uid);
-      } catch {
-        // table absente
-      }
-    }
+    applyEventConfigPatch(db, patch);
   });
-
   tx();
   return getEventConfig(db);
 }

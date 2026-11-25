@@ -1,12 +1,26 @@
+import crypto from 'node:crypto';
 import type Database from 'better-sqlite3';
-import { getEventConfig, updateEventConfig } from './config.js';
-import { listFeaturedItems, recalculateFeaturedLadder } from './featured.js';
+import { applyEventConfigPatch, getEventConfig } from './config.js';
+import { getFeaturedLadder, listFeaturedItems } from './featured.js';
 import { listTournamentsWithRegistrations } from './tournaments.js';
 import { slugify } from './catalog.js';
+import type { EditionArchiveRow, FeaturedLadderEntry, LeaderboardEntry } from './types.js';
 
 // ============================================================================
 // CYCLE DE VIE DES ÉDITIONS & HALL OF FAME (editions_archive)
 // ============================================================================
+
+export interface CompactLeaderboardEntry {
+  rank: number;
+  id: string;
+  display_name: string;
+  avatar: string | null;
+  total_points: number;
+  async_points: number;
+  live_points: number;
+  quests_validated: number;
+  tombola_eligible: boolean;
+}
 
 export interface EditionSnapshot {
   event_name: string;
@@ -17,8 +31,8 @@ export interface EditionSnapshot {
   acts_count: number;
   started_at: string;
   ended_at: string;
-  podium: any[];
-  leaderboard: any[];
+  podium: CompactLeaderboardEntry[];
+  leaderboard: CompactLeaderboardEntry[];
   tombola_winner: { id: string; display_name: string; total_points: number } | null;
   tournaments: {
     id: string;
@@ -32,7 +46,7 @@ export interface EditionSnapshot {
     enabled: boolean;
     title: string;
     ladder_title: string;
-    ladder_top: any[];
+    ladder_top: FeaturedLadderEntry[];
     stages_count: number;
   };
   stats: {
@@ -46,7 +60,7 @@ export interface EditionSnapshot {
 export function listArchivedEditions(db: Database.Database) {
   const rows = db
     .prepare(`SELECT * FROM editions_archive ORDER BY archived_at DESC, rowid DESC`)
-    .all() as any[];
+    .all() as EditionArchiveRow[];
   return rows.map((r) => ({
     id: r.id,
     name: r.name,
@@ -70,7 +84,7 @@ export function deleteArchivedEdition(db: Database.Database, id: string): { dele
 export function archiveCurrentEdition(
   db: Database.Database,
   opts: {
-    leaderboard: any[];
+    leaderboard: LeaderboardEntry[];
     customName?: string;
     tombolaWinner?: { id: string; display_name: string; total_points: number } | null;
   }
@@ -78,7 +92,7 @@ export function archiveCurrentEdition(
   const cfg = getEventConfig(db);
   const name = String(opts.customName || cfg.event_name).trim() || cfg.event_name;
   const tournaments = listTournamentsWithRegistrations(db, true);
-  const ladder = recalculateFeaturedLadder(db);
+  const ladder = getFeaturedLadder(db);
   const items = listFeaturedItems(db, false);
 
   const totalQuests = (
@@ -96,14 +110,14 @@ export function archiveCurrentEdition(
       | undefined;
     if (saved?.value) {
       try {
-        tombolaWinner = JSON.parse(saved.value);
+        tombolaWinner = JSON.parse(saved.value) as { id: string; display_name: string; total_points: number };
       } catch {
         tombolaWinner = null;
       }
     }
   }
 
-  const lbCompact = opts.leaderboard.map((p) => ({
+  const lbCompact: CompactLeaderboardEntry[] = opts.leaderboard.map((p) => ({
     rank: p.rank,
     id: p.id,
     display_name: p.display_name,
@@ -134,10 +148,10 @@ export function archiveCurrentEdition(
       team_size: t.team_size,
       scoring_mode: t.scoring_mode,
       top_players: t.registrations
-        .filter((r: any) => r.placement || r.points_awarded > 0)
-        .sort((a: any, b: any) => (a.placement || 999) - (b.placement || 999))
+        .filter((r) => Boolean(r.placement) || r.points_awarded > 0)
+        .sort((a, b) => (a.placement || 999) - (b.placement || 999))
         .slice(0, 12)
-        .map((r: any) => ({
+        .map((r) => ({
           user_id: r.user_id,
           display_name: r.display_name,
           placement: r.placement ?? null,
@@ -161,7 +175,7 @@ export function archiveCurrentEdition(
   };
 
   const baseId = slugify(name) || 'edition';
-  const id = `${baseId}_${Date.now()}`;
+  const id = `${baseId}_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
 
   db.prepare(
     `INSERT INTO editions_archive (id, name, subtitle, started_at, ended_at, snapshot_json)
@@ -172,18 +186,18 @@ export function archiveCurrentEdition(
 }
 
 /**
- * Démarre une nouvelle édition proprement :
- * 1. Archive l'édition actuelle dans le Hall of Fame (si `archiveCurrent !== false` et qu'il y a eu des points).
- * 2. Remet à zéro les données de session (ledger, défis tirés, jeux cochés par les joueurs, inscriptions tournois, soumissions jeu vedette).
- * 3. Conserve intacts les comptes Discord (`users`), toute la bibliothèque `games` & `quests`, et le Hall of Fame.
- * 4. Optionnellement conserve ou vide la liste des tournois et des épreuves vedettes.
- * 5. Passe l'édition en mode `draft` (Préparation) avec son nouveau nom.
+ * Démarre une nouvelle édition de façon entièrement atomique :
+ * 1. Archive l'édition actuelle dans le Hall of Fame (si `archiveCurrent !== false` et qu'il y a eu de l'activité).
+ * 2. Remet à zéro les données de session (ledger, défis tirés, jeux cochés, inscriptions tournois, soumissions jeu vedette).
+ * 3. Conserve intacts les comptes Discord (`users`), le catalogue `games` & `quests`, et le Hall of Fame.
+ * 4. Passe l'édition en mode `draft` (Préparation) avec son nouveau nom dans la même transaction.
+ * 5. Retourne les noms de fichiers preuve/replay à nettoyer sur disque après commit.
  */
 export function startNewEdition(
   db: Database.Database,
   params: {
     newName: string;
-    leaderboard: any[];
+    leaderboard: LeaderboardEntry[];
     archiveCurrent?: boolean;
     keepTournaments?: boolean;
     keepFeaturedItems?: boolean;
@@ -195,15 +209,31 @@ export function startNewEdition(
   }
 
   let archived: { id: string; name: string } | null = null;
-  const hasActivity =
-    (db.prepare(`SELECT COUNT(*) AS c FROM points_ledger`).get() as { c: number }).c > 0 ||
-    (db.prepare(`SELECT COUNT(*) AS c FROM daily_assignments`).get() as { c: number }).c > 0;
+  let orphanProofFiles: string[] = [];
+  let orphanReplayFiles: string[] = [];
 
   const tx = db.transaction(() => {
+    const hasActivity =
+      (db.prepare(`SELECT COUNT(*) AS c FROM points_ledger`).get() as { c: number }).c > 0 ||
+      (db.prepare(`SELECT COUNT(*) AS c FROM daily_assignments`).get() as { c: number }).c > 0;
+
     if (params.archiveCurrent !== false && hasActivity) {
       const a = archiveCurrentEdition(db, { leaderboard: params.leaderboard });
       archived = { id: a.id, name: a.name };
     }
+
+    const dailyProofs = db
+      .prepare(`SELECT proof_file FROM daily_assignments WHERE proof_file IS NOT NULL AND proof_file != ''`)
+      .all() as { proof_file: string }[];
+    const featProofs = db
+      .prepare(`SELECT proof_file FROM featured_submissions WHERE proof_file IS NOT NULL AND proof_file != ''`)
+      .all() as { proof_file: string }[];
+    const featReplays = db
+      .prepare(`SELECT file_name FROM featured_submissions WHERE file_name IS NOT NULL AND file_name != '' AND proof_type = 'gbx'`)
+      .all() as { file_name: string }[];
+
+    orphanProofFiles = [...dailyProofs.map((r) => r.proof_file), ...featProofs.map((r) => r.proof_file)];
+    orphanReplayFiles = featReplays.map((r) => r.file_name);
 
     // Remise à zéro des données de la session uniquement
     db.prepare(`DELETE FROM points_ledger`).run();
@@ -223,16 +253,18 @@ export function startNewEdition(
     if (params.keepFeaturedItems === false) {
       db.prepare(`DELETE FROM featured_items`).run();
     }
+
+    applyEventConfigPatch(db, {
+      event_name: newName,
+      status_mode: 'draft',
+    });
   });
   tx();
 
-  const updatedConfig = updateEventConfig(db, {
-    event_name: newName,
-    status_mode: 'draft',
-  });
-
   return {
     archived,
-    eventConfig: updatedConfig,
+    eventConfig: getEventConfig(db),
+    orphanProofFiles,
+    orphanReplayFiles,
   };
 }

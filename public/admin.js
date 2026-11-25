@@ -3,6 +3,7 @@ import {
   $,
   api,
   avatar,
+  confirmDialog,
   diffPips,
   emptyCard,
   esc,
@@ -12,6 +13,8 @@ import {
   monogram,
   parseMetricInput,
   plain,
+  promptDialog,
+  safeUrl,
   signed,
   timeAgo,
   tName,
@@ -149,9 +152,10 @@ function renderReview() {
   const isFeat = p.kind === 'featured';
   const isImg = p.proof_file && /\.(png|jpe?g|webp|gif)$/i.test(p.proof_file);
   const fileUrl = p.proof_file ? `/uploads/proofs/${encodeURIComponent(p.proof_file)}` : '';
+  const safeProofLink = safeUrl(p.proof_url);
   const media = isImg
     ? `<button type="button" class="hgw-review__media review-media" id="review-zoom" aria-label="Agrandir la capture"><img src="${fileUrl}" alt="Preuve de ${esc(p.display_name)}" /></button>`
-    : `<div class="hgw-review__media">${p.proof_file ? `<a href="${fileUrl}" target="_blank" rel="noopener">${icon('play')} Ouvrir le fichier</a>` : p.proof_url ? `<a href="${esc(p.proof_url)}" target="_blank" rel="noopener noreferrer">${icon('external')} Ouvrir le lien</a>` : 'Aucun fichier'}</div>`;
+    : `<div class="hgw-review__media">${p.proof_file ? `<a href="${fileUrl}" target="_blank" rel="noopener noreferrer">${icon('play')} Ouvrir le fichier</a>` : safeProofLink ? `<a href="${esc(safeProofLink)}" target="_blank" rel="noopener noreferrer">${icon('external')} Ouvrir le lien</a>` : 'Aucun fichier'}</div>`;
 
   const badges = isFeat
     ? `<span class="hgw-badge hgw-badge--info">${icon('star')}Jeu vedette</span>
@@ -168,7 +172,7 @@ function renderReview() {
           <span class="hgw-review__queue" style="margin-left:auto">${reviewIndex + 1} / ${list.length}</span></div>
         <h3 class="hgw-review__title">${esc(plain(p.title))}</h3>
         <p class="muted"><b style="color:var(--ink-1)">Consigne :</b> ${esc(plain(p.description))}</p>
-        ${p.proof_url && p.proof_file ? `<p class="small" style="margin-top: var(--space-2)"><a href="${esc(p.proof_url)}" target="_blank" rel="noopener noreferrer">Lien joint</a></p>` : ''}
+        ${safeProofLink && p.proof_file ? `<p class="small" style="margin-top: var(--space-2)"><a href="${esc(safeProofLink)}" target="_blank" rel="noopener noreferrer">Lien joint</a></p>` : ''}
         ${p.proof_note ? `<p class="small muted" style="margin-top: var(--space-2)">Note du joueur : « ${esc(p.proof_note)} »</p>` : ''}
         <div class="hgw-review__actions">
           <button type="button" class="hgw-btn hgw-btn--primary hgw-btn--sm" data-decide="approve">Valider <span class="hgw-btn__kbd">V</span></button>
@@ -563,7 +567,13 @@ function renderEditionEditor() {
   });
 
   $('ed-archive-btn').addEventListener('click', async () => {
-    const customName = prompt('Nom de l’archive dans le Hall of Fame :', cfg.event_name);
+    const customName = await promptDialog({
+      title: 'Archiver dans le Hall of Fame',
+      message: 'Choisis le nom de cette archive officielle.',
+      label: 'Nom de l’archive',
+      defaultValue: cfg.event_name,
+      confirmLabel: 'Archiver',
+    });
     if (!customName) return;
     const { ok, data } = await api('/api/admin/editions/archive', { json: { name: customName } });
     if (!ok) return toastError(data);
@@ -856,7 +866,7 @@ function renderFeaturedAdmin() {
                   ${
                     f.metric_type !== 'binary' && Object.keys(it.thresholds_formatted || {}).length
                       ? ` · ${Object.entries(it.thresholds_formatted)
-                          .map(([k, v]) => `${k}: ${v}`)
+                          .map(([k, v]) => `${esc(k)}: ${esc(v)}`)
                           .join(' · ')}`
                       : ''
                   }
@@ -1005,7 +1015,13 @@ function bindFeaturedItemDialog() {
   });
 
   $('fi-delete').addEventListener('click', async () => {
-    if (!featItemEdit?.id || !confirm('Supprimer définitivement cette épreuve ?')) return;
+    if (!featItemEdit?.id) return;
+    const confirmed = await confirmDialog({
+      title: 'Supprimer cette épreuve ?',
+      message: 'Cette action est définitive.',
+      confirmLabel: 'Supprimer',
+    });
+    if (!confirmed) return;
     const { ok, data } = await api(`/api/admin/featured/items/${encodeURIComponent(featItemEdit.id)}`, { method: 'DELETE' });
     if (!ok) {
       $('fi-error').textContent = plain(data.error);
@@ -1184,17 +1200,18 @@ function renderAdminTournaments() {
 
   // Bind Live Direct / Équipes
   const tbody = $('admin-pools-tbody');
+  const encActiveT = activeT ? encodeURIComponent(activeT.id) : '';
   if (tbody && activeT) {
     tbody.querySelectorAll('[data-pool]').forEach((s) =>
       s.addEventListener('change', async () => {
-        const { ok, data } = await api(`/api/admin/tournaments/${activeT.id}/player`, { json: { userId: s.dataset.pool, pool: Number(s.value) } });
+        const { ok, data } = await api(`/api/admin/tournaments/${encActiveT}/player`, { json: { userId: s.dataset.pool, pool: Number(s.value) } });
         if (!ok) toastError(data);
         ctx.scheduleFetch();
       })
     );
     tbody.querySelectorAll('[data-checkin]').forEach((c) =>
       c.addEventListener('change', async () => {
-        const { ok, data } = await api(`/api/admin/tournaments/${activeT.id}/player`, { json: { userId: c.dataset.checkin, checkedIn: c.checked } });
+        const { ok, data } = await api(`/api/admin/tournaments/${encActiveT}/player`, { json: { userId: c.dataset.checkin, checkedIn: c.checked } });
         if (!ok) toastError(data);
         ctx.scheduleFetch();
       })
@@ -1202,7 +1219,7 @@ function renderAdminTournaments() {
     tbody.querySelectorAll('[data-team-num]').forEach((s) =>
       s.addEventListener('change', async () => {
         const val = s.value ? Number(s.value) : null;
-        const { ok, data } = await api(`/api/admin/tournaments/${activeT.id}/player`, { json: { userId: s.dataset.teamNum, teamNumber: val } });
+        const { ok, data } = await api(`/api/admin/tournaments/${encActiveT}/player`, { json: { userId: s.dataset.teamNum, teamNumber: val } });
         if (!ok) toastError(data);
         else toast({ title: 'Équipe ajustée', type: 'success' });
         ctx.scheduleFetch();
@@ -1211,7 +1228,7 @@ function renderAdminTournaments() {
   }
 
   const draw = async (announceDiscord) => {
-    const { ok, data } = await api(`/api/admin/tournaments/${activeT.id}/draw-teams`, { json: { onlyCheckedIn: true, announceDiscord } });
+    const { ok, data } = await api(`/api/admin/tournaments/${encActiveT}/draw-teams`, { json: { onlyCheckedIn: true, announceDiscord } });
     if (!ok) return toastError(data);
     toast({ title: `${data.teams.length} équipes tirées`, text: announceDiscord ? 'Annonce envoyée sur Discord.' : 'Ouvre la scène pour les révéler en stream.', type: 'success' });
     ctx.fetchState();
@@ -1225,7 +1242,7 @@ function renderAdminTournaments() {
       .filter((s) => s.value)
       .map((s) => ({ userId: s.dataset.place, placement: Number(s.value) }));
     if (!placements.length) return toast({ title: 'Aucune place renseignée', type: 'danger' });
-    const { ok, data } = await api(`/api/admin/tournaments/${activeT.id}/placements`, { json: { placements } });
+    const { ok, data } = await api(`/api/admin/tournaments/${encActiveT}/placements`, { json: { placements } });
     if (!ok) return toastError(data);
     toast({ title: 'Résultats enregistrés', text: 'Les points live sont crédités.', type: 'success' });
     ctx.fetchState();
@@ -1259,7 +1276,7 @@ function renderAdminTournaments() {
         scores: [...tr.querySelectorAll('[data-r-idx]')].map((i) => Number(i.value) || 0),
       }));
       if (!scores.length) return;
-      const { ok, data } = await api(`/api/admin/tournaments/${activeT.id}/rounds`, { json: { scores } });
+      const { ok, data } = await api(`/api/admin/tournaments/${encActiveT}/rounds`, { json: { scores } });
       if (!ok) return toastError(data);
       toast({ title: 'Manches calculées et points attribués', type: 'success' });
       ctx.fetchState();
@@ -1384,7 +1401,13 @@ function bindTourneyDialog() {
   });
 
   $('tf-delete').addEventListener('click', async () => {
-    if (!tourneyEdit?.id || !confirm('Supprimer définitivement ce tournoi ?')) return;
+    if (!tourneyEdit?.id) return;
+    const confirmed = await confirmDialog({
+      title: 'Supprimer ce tournoi ?',
+      message: 'Cette action est définitive.',
+      confirmLabel: 'Supprimer',
+    });
+    if (!confirmed) return;
     const { ok, data } = await api(`/api/admin/tournaments/${encodeURIComponent(tourneyEdit.id)}`, { method: 'DELETE' });
     if (!ok) {
       $('tf-error').textContent = plain(data.error);
@@ -1619,7 +1642,13 @@ async function toggleQuest(id, silent = false) {
 
 async function removeQuest(id) {
   const q = adminCatalog.quests.find((x) => x.id === id);
-  if (!q || !confirm(`Supprimer définitivement « ${plain(q.title)} » ?`)) return false;
+  if (!q) return false;
+  const confirmed = await confirmDialog({
+    title: 'Supprimer ce défi ?',
+    message: `Supprimer définitivement « ${plain(q.title)} » ?`,
+    confirmLabel: 'Supprimer',
+  });
+  if (!confirmed) return false;
   const { ok, data } = await api(`/api/admin/quests/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!ok) {
     toastError(data);
@@ -1694,9 +1723,12 @@ async function loadLogoImages() {
   $('gf-sgdb-images').innerHTML = `<p class="small faint">Chargement…</p>`;
   const { ok, data } = await api(`/api/admin/logo-search/${sgdbGameId}/images?type=${sgdbType}`);
   if (!ok) return ($('gf-sgdb-images').innerHTML = `<p class="small t-danger">${esc(plain(data.error))}</p>`);
-  if (!data.images.length) return ($('gf-sgdb-images').innerHTML = `<p class="small faint">Aucune image de ce type.</p>`);
-  $('gf-sgdb-images').innerHTML = data.images
-    .map((i) => `<button type="button" data-img="${esc(i.url)}" title="${i.width} × ${i.height}"><img src="${esc(i.thumb)}" alt="" loading="lazy" /></button>`)
+  const safeImages = (data.images || [])
+    .map((i) => ({ ...i, safeUrl: safeUrl(i.url, ['https:']), safeThumb: safeUrl(i.thumb, ['https:']) }))
+    .filter((i) => i.safeUrl && i.safeThumb);
+  if (!safeImages.length) return ($('gf-sgdb-images').innerHTML = `<p class="small faint">Aucune image de ce type.</p>`);
+  $('gf-sgdb-images').innerHTML = safeImages
+    .map((i) => `<button type="button" data-img="${esc(i.safeUrl)}" title="${esc(i.width)} × ${esc(i.height)}"><img src="${esc(i.safeThumb)}" alt="" loading="lazy" /></button>`)
     .join('');
   $('gf-sgdb-images')
     .querySelectorAll('[data-img]')
@@ -1921,7 +1953,13 @@ function bindCatalog() {
   });
   $('gf-delete').addEventListener('click', async () => {
     const g = catGame(gameEdit?.id);
-    if (!g || !confirm(`Supprimer définitivement ${g.name} et ses ${g.quest_count} défis ?`)) return;
+    if (!g) return;
+    const confirmed = await confirmDialog({
+      title: 'Supprimer ce jeu ?',
+      message: `Supprimer définitivement ${g.name} et ses ${g.quest_count} défis ?`,
+      confirmLabel: 'Supprimer',
+    });
+    if (!confirmed) return;
     const { ok, data } = await api(`/api/admin/games/${encodeURIComponent(g.id)}`, { method: 'DELETE' });
     if (!ok) return ($('gf-error').textContent = plain(data.error));
     $('game-dialog').close();

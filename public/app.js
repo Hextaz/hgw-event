@@ -3,6 +3,7 @@ import {
   $,
   api,
   avatar,
+  confirmDialog,
   copyText,
   deltaSec,
   diffPips,
@@ -16,6 +17,7 @@ import {
   monogram,
   parseMetricInput,
   plain,
+  safeUrl,
   signed,
   teamsOf,
   timeAgo,
@@ -93,6 +95,10 @@ function navigate(path, { replace = false } = {}) {
 
 function applyRoute(r) {
   if (r.view === 'admin' && appState && appState.user?.is_admin !== 1) {
+    history.replaceState({}, '', '/');
+    r = { path: '/', ...ROUTES['/'] };
+  }
+  if (isDraftLockedForViewer() && r.view !== 'today' && r.view !== 'hof') {
     history.replaceState({}, '', '/');
     r = { path: '/', ...ROUTES['/'] };
   }
@@ -798,6 +804,7 @@ function renderFeatured() {
 
   const topScalePreview = (f.ladder_points_scale || []).slice(0, 5).join(' · ');
 
+  const safeJoinUrl = safeUrl(f.server_info?.join_url, ['https:', 'http:', 'tmtp:']);
   const ladderCard = f.ladder_enabled
     ? `<div class="hgw-card">
         <div class="hgw-card__head">
@@ -811,7 +818,7 @@ function renderFeatured() {
           unlocked && f.server_info?.enabled && f.server_info?.address
             ? `<div class="addr"><div><div class="hgw-stat__label">${esc(f.server_info.label || 'Serveur')}</div><div class="addr__v">${esc(f.server_info.address)}</div></div>
                 <div class="row"><button type="button" class="hgw-btn hgw-btn--secondary hgw-btn--sm" id="copy-feat-addr">${icon('copy')}Copier</button>
-                ${f.server_info.join_url ? `<a class="hgw-btn hgw-btn--primary hgw-btn--sm" href="${esc(f.server_info.join_url)}">${icon('play')}Rejoindre</a>` : ''}</div></div>`
+                ${safeJoinUrl ? `<a class="hgw-btn hgw-btn--primary hgw-btn--sm" href="${esc(safeJoinUrl)}">${icon('play')}Rejoindre</a>` : ''}</div></div>`
             : !unlocked && !locked
             ? `<div class="banner">${icon('lock')}<span>Ouvre au début de ${esc(unlockAct?.name || `l’Acte ${f.ladder_unlock_act}`)}${unlockAct?.start_at ? `, le ${esc(fmtDate(unlockAct.start_at))}` : ''}.</span></div>`
             : locked
@@ -1078,6 +1085,7 @@ function renderTournaments() {
           const teams = teamsOf(t);
           const isTeam = t.team_size > 1;
           const gameObj = (appState.games || []).find((g) => g.id === t.game_id) || { name: tName(t) };
+          const safeBracket = safeUrl(t.bracket_url);
           return `<article class="hgw-card">
             <div class="hgw-card__head">
               <div class="row" style="gap: var(--space-3); flex-wrap: nowrap">${monogram(gameObj)}
@@ -1088,7 +1096,7 @@ function renderTournaments() {
             <div class="row-between" style="margin-top: var(--space-4)">
               <div class="row">
                 <span class="small muted">${t.registrations.length} inscrit${t.registrations.length > 1 ? 's' : ''}</span>
-                ${t.bracket_url ? `<a href="${esc(t.bracket_url)}" target="_blank" rel="noopener" class="hgw-btn hgw-btn--ghost hgw-btn--sm">${icon('external')}Bracket</a>` : ''}
+                ${safeBracket ? `<a href="${esc(safeBracket)}" target="_blank" rel="noopener noreferrer" class="hgw-btn hgw-btn--ghost hgw-btn--sm">${icon('external')}Bracket</a>` : ''}
               </div>
               <button type="button" class="hgw-btn ${mine ? 'hgw-btn--secondary' : 'hgw-btn--primary'} hgw-btn--sm" data-toggle-t="${esc(t.id)}">${mine ? `${icon('check')}Inscrit · se désinscrire` : 'M’inscrire'}</button>
             </div>
@@ -1113,7 +1121,7 @@ function renderTournaments() {
       b.addEventListener('click', async () => {
         if (!appState.user) return openLogin();
         b.disabled = true;
-        const { ok, data } = await api(`/api/tournaments/${b.dataset.toggleT}/toggle`, { method: 'POST' });
+        const { ok, data } = await api(`/api/tournaments/${encodeURIComponent(b.dataset.toggleT)}/toggle`, { method: 'POST' });
         if (!ok) {
           b.disabled = false;
           return toastError(data);
@@ -1226,7 +1234,12 @@ function renderHof() {
     );
 
   $('hof-delete')?.addEventListener('click', async () => {
-    if (!confirm(`Supprimer définitivement l’archive « ${active.name} » ?`)) return;
+    const confirmed = await confirmDialog({
+      title: 'Supprimer cette archive ?',
+      message: `Supprimer définitivement l’archive « ${active.name} » ?`,
+      confirmLabel: 'Supprimer',
+    });
+    if (!confirmed) return;
     const { ok, data } = await api(`/api/admin/editions/${encodeURIComponent(active.id)}`, { method: 'DELETE' });
     if (!ok) return toastError(data);
     hofSelectedId = null;
@@ -1498,7 +1511,9 @@ function connectSse() {
       if (payload.type === 'catalog_updated') markCatalogStale();
       if (payload.message) toast({ title: plain(payload.message), type: payload.type === 'points_updated' ? 'points' : 'info' });
       scheduleFetch();
-    } catch {}
+    } catch (err) {
+      console.warn('SSE message ignoré:', err);
+    }
   };
   es.onerror = () => {
     sseConnected = false;
@@ -1640,7 +1655,10 @@ function bindStatic() {
     btn.disabled = true;
     btn.setAttribute('aria-busy', 'true');
     btn.innerHTML = '<span class="hgw-spinner"></span>Envoi…';
-    const endpoint = mode === 'featured' ? `/api/featured/${encodeURIComponent(targetId)}/submit` : `/api/quests/${targetId}/submit`;
+    const endpoint =
+      mode === 'featured'
+        ? `/api/featured/${encodeURIComponent(targetId)}/submit`
+        : `/api/quests/${encodeURIComponent(targetId)}/submit`;
     const { ok, data } = await api(endpoint, { method: 'POST', body: fd });
     btn.disabled = false;
     btn.removeAttribute('aria-busy');

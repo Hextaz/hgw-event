@@ -92,7 +92,13 @@
       const compact = params.get('compact') === '1';
       if (compact) hud.classList.add('compact');
 
-      const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const esc = (s) =>
+        String(s ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
       const plain = (s) => String(s ?? '').replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '').replace(/\s{2,}/g, ' ').trim();
 
       function pushAlert(badge, message) {
@@ -110,6 +116,13 @@
           const cfg = state.eventSettings || {};
           const feat = cfg.featured || {};
           document.getElementById('hud-title').textContent = cfg.event_name || 'Classement';
+
+          if (cfg.effective_phase === 'draft') {
+            document.getElementById('top').innerHTML = `<div class="row"><span class="row__name">Édition en préparation…</span></div>`;
+            document.getElementById('foot-feat').textContent = 'Bientôt disponible';
+            document.getElementById('foot-tombola').textContent = '';
+            return;
+          }
 
           const lb = (state.leaderboard || []).slice(0, compact ? 3 : 5);
           let prev = null;

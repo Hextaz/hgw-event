@@ -283,3 +283,118 @@ export function copyText(text, label) {
   navigator.clipboard?.writeText(text);
   toast({ title: label || 'Copié', text, type: 'success' });
 }
+
+/**
+ * Valide une URL avant insertion dans href/src (bloque javascript:, data:, etc.).
+ */
+export function safeUrl(raw, allowedProtocols = ['https:', 'http:']) {
+  if (!raw || typeof raw !== 'string') return null;
+  const s = raw.trim();
+  if (!s) return null;
+  try {
+    const u = new URL(s);
+    return allowedProtocols.includes(u.protocol) ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+export function confirmDialog({ title = 'Confirmation', message = '', confirmLabel = 'Confirmer', danger = true }) {
+  return new Promise((resolve) => {
+    const dlg = $('action-dialog');
+    if (!dlg) return resolve(false);
+    const form = $('action-dialog-form');
+    const okBtn = $('action-dialog-ok');
+    const cancelBtn = $('action-dialog-cancel');
+    $('action-dialog-title').textContent = title;
+    $('action-dialog-msg').textContent = message;
+    $('action-dialog-input-wrap').hidden = true;
+    okBtn.textContent = confirmLabel;
+    okBtn.className = `hgw-btn ${danger ? 'hgw-btn--danger' : 'hgw-btn--primary'}`;
+
+    const cleanup = (val) => {
+      form.removeEventListener('submit', onSubmit);
+      cancelBtn.removeEventListener('click', onCancel);
+      dlg.removeEventListener('cancel', onCancel);
+      dlg.removeEventListener('close', onClose);
+      resolve(val);
+    };
+    let done = false;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      if (dlg.open) dlg.close();
+      cleanup(val);
+    };
+    const onSubmit = (e) => {
+      e.preventDefault();
+      finish(true);
+    };
+    const onCancel = () => finish(false);
+    const onClose = () => finish(false);
+
+    form.addEventListener('submit', onSubmit);
+    cancelBtn.addEventListener('click', onCancel);
+    dlg.addEventListener('cancel', onCancel);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+    okBtn.focus();
+  });
+}
+
+export function promptDialog({
+  title = 'Saisie',
+  message = '',
+  label = 'Nom',
+  defaultValue = '',
+  placeholder = '',
+  confirmLabel = 'Valider',
+}) {
+  return new Promise((resolve) => {
+    const dlg = $('action-dialog');
+    if (!dlg) return resolve(null);
+    const form = $('action-dialog-form');
+    const okBtn = $('action-dialog-ok');
+    const cancelBtn = $('action-dialog-cancel');
+    const input = $('action-dialog-input');
+    $('action-dialog-title').textContent = title;
+    $('action-dialog-msg').textContent = message;
+    $('action-dialog-label').textContent = label;
+    $('action-dialog-input-wrap').hidden = false;
+    input.value = defaultValue;
+    input.placeholder = placeholder;
+    okBtn.textContent = confirmLabel;
+    okBtn.className = 'hgw-btn hgw-btn--primary';
+
+    const cleanup = (val) => {
+      form.removeEventListener('submit', onSubmit);
+      cancelBtn.removeEventListener('click', onCancel);
+      dlg.removeEventListener('cancel', onCancel);
+      dlg.removeEventListener('close', onClose);
+      resolve(val);
+    };
+    let done = false;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      if (dlg.open) dlg.close();
+      cleanup(val);
+    };
+    const onSubmit = (e) => {
+      e.preventDefault();
+      const val = input.value.trim();
+      if (!val) return input.focus();
+      finish(val);
+    };
+    const onCancel = () => finish(null);
+    const onClose = () => finish(null);
+
+    form.addEventListener('submit', onSubmit);
+    cancelBtn.addEventListener('click', onCancel);
+    dlg.addEventListener('cancel', onCancel);
+    dlg.addEventListener('close', onClose);
+    dlg.showModal();
+    input.focus();
+    input.select();
+  });
+}

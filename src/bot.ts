@@ -14,13 +14,30 @@ import {
   SlashCommandBuilder,
   TextInputBuilder,
   TextInputStyle,
+  type ButtonInteraction,
+  type ChatInputCommandInteraction,
+  type ModalSubmitInteraction,
+  type PermissionsBitField,
   type TextChannel,
 } from 'discord.js';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
-import { getEventConfig } from './config.js';
+import { getEventConfig, isPlayablePhase } from './config.js';
 import { drawDailyQuestsForUser, getGlobalLeaderboard, reviewDailyAssignment } from './engine.js';
 import { formatMetricValue, reviewFeaturedSubmission } from './featured.js';
+import {
+  errorMessage,
+  type DailyAssignmentDetailRow,
+  type FeaturedSubmissionDetailRow,
+  type TournamentRow,
+} from './types.js';
+
+export interface AnnouncedTeam {
+  teamNumber: number;
+  teamName: string;
+  averagePool: number;
+  members: { user_id: string; display_name: string; avatar: string | null; pool: number }[];
+}
 
 export class HgwDiscordBot {
   private client: Client | null = null;
@@ -69,9 +86,9 @@ export class HgwDiscordBot {
         } else if (interaction.isModalSubmit()) {
           await this.handleModalSubmit(interaction);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('❌ [Discord Bot] Erreur interaction:', err);
-        const msg = err?.message || 'Une erreur interne est survenue.';
+        const msg = errorMessage(err, 'Une erreur interne est survenue.');
         if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
           await interaction.reply({ content: `❌ ${msg}`, ephemeral: true }).catch(() => {});
         }
@@ -80,8 +97,8 @@ export class HgwDiscordBot {
 
     try {
       await this.client.login(token);
-    } catch (err: any) {
-      console.error('⚠️ [Discord Bot] Échec de connexion Discord:', err?.message || err);
+    } catch (err: unknown) {
+      console.error('⚠️ [Discord Bot] Échec de connexion Discord:', errorMessage(err));
     }
   }
 
@@ -105,12 +122,12 @@ export class HgwDiscordBot {
     try {
       await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
       console.log('⚡ [Discord Bot] Slash commands (/defis, /classement, /profil) enregistrées.');
-    } catch (err: any) {
-      console.error('⚠️ [Discord Bot] Impossible d’enregistrer les slash commands:', err?.message || err);
+    } catch (err: unknown) {
+      console.error('⚠️ [Discord Bot] Impossible d’enregistrer les slash commands:', errorMessage(err));
     }
   }
 
-  private isDiscordUserAdmin(userId: string, memberPermissions?: Readonly<any>): boolean {
+  private isDiscordUserAdmin(userId: string, memberPermissions?: Readonly<PermissionsBitField> | null): boolean {
     const adminIds = (process.env.ADMIN_DISCORD_IDS || '')
       .split(',')
       .map((s) => s.trim())
@@ -122,13 +139,22 @@ export class HgwDiscordBot {
       | undefined;
     if (dbUser?.is_admin === 1) return true;
 
-    if (memberPermissions?.has?.(PermissionFlagsBits.ManageGuild)) return true;
+    if (memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return true;
     return false;
   }
 
-  private async handleSlashCommand(interaction: any): Promise<void> {
+  private async handleSlashCommand(interaction: ChatInputCommandInteraction): Promise<void> {
     const baseUrl = process.env.BASE_URL || 'https://hgw.hextaz.dev';
     const cfg = getEventConfig(this.db);
+    const isAdmin = this.isDiscordUserAdmin(interaction.user.id, interaction.memberPermissions);
+
+    if (cfg.effective_phase === 'draft' && !isAdmin) {
+      await interaction.reply({
+        content: `⏳ **${cfg.event_name}** est en cours de préparation ! Revenez très vite sur **${baseUrl}** (le Hall of Fame reste consultable).`,
+        ephemeral: true,
+      });
+      return;
+    }
 
     if (interaction.commandName === 'classement') {
       const lb = getGlobalLeaderboard(this.db).slice(0, 10);
@@ -137,10 +163,10 @@ export class HgwDiscordBot {
         return;
       }
 
-      const lines = lb.map((p: any, i: number) => {
+      const lines = lb.map((p, i) => {
         const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`#${i + 1}\``;
         const ticket = p.tombola_eligible ? '🎟️' : '';
-        return `${medal} **${p.display_name}** — **${p.total_points} pts** *(Quinzaine: ${p.async_points} | Live: ${p.live_points})* ${ticket}`;
+        return `${medal} **${p.display_name}** — **${p.total_points} pts** *(Défis: ${p.async_points} | Live: ${p.live_points})* ${ticket}`;
       });
 
       const embed = new EmbedBuilder()
@@ -155,6 +181,14 @@ export class HgwDiscordBot {
     }
 
     if (interaction.commandName === 'defis') {
+      if (!isPlayablePhase(cfg.effective_phase)) {
+        await interaction.reply({
+          content: `⏳ Les défis quotidiens ne sont pas ouverts pour le moment (phase : **${cfg.effective_phase}**).`,
+          ephemeral: true,
+        });
+        return;
+      }
+
       const quests = drawDailyQuestsForUser(this.db, interaction.user.id);
       if (quests.length === 0) {
         await interaction.reply({
@@ -173,7 +207,7 @@ export class HgwDiscordBot {
       };
 
       const lines = quests.map(
-        (q: any) =>
+        (q) =>
           `${q.game_emoji} **[${q.difficulty.toUpperCase()} • ${q.points} pts] ${q.title}** (${q.game_name})\n> ${q.description}\n> Statut : **${statusEmoji[q.status] || q.status}**`
       );
 
@@ -189,7 +223,7 @@ export class HgwDiscordBot {
 
     if (interaction.commandName === 'profil') {
       const lb = getGlobalLeaderboard(this.db);
-      const me = lb.find((u: any) => u.id === interaction.user.id);
+      const me = lb.find((u) => u.id === interaction.user.id);
       if (!me) {
         await interaction.reply({
           content: `Connectez-vous une première fois sur **${baseUrl}** pour créer votre profil !`,
@@ -232,7 +266,7 @@ export class HgwDiscordBot {
     }
   }
 
-  private async handleButtonInteraction(interaction: any): Promise<void> {
+  private async handleButtonInteraction(interaction: ButtonInteraction): Promise<void> {
     const [prefix, rawId] = (interaction.customId || '').split(':');
     const isDaily = prefix === 'hgw_approve' || prefix === 'hgw_reject';
     const isFeatured = prefix === 'hgw_feat_approve' || prefix === 'hgw_feat_reject';
@@ -249,33 +283,45 @@ export class HgwDiscordBot {
     const numericId = Number.parseInt(rawId, 10);
     if (!Number.isFinite(numericId)) return;
 
+    const baseEmbed = interaction.message.embeds[0]
+      ? EmbedBuilder.from(interaction.message.embeds[0])
+      : new EmbedBuilder().setTitle(`Preuve #${numericId}`);
+
     if (prefix === 'hgw_approve') {
-      const updated = reviewDailyAssignment(this.db, {
-        assignmentId: numericId,
-        action: 'approve',
-        reviewerId: interaction.user.username,
-      });
-      const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-        .setColor(0x10b981)
-        .setFooter({ text: `✅ Validé par ${interaction.user.username} (+${updated.points} pts crédités)` });
-      await interaction.update({ embeds: [approvedEmbed], components: [] });
-      this.onStateChanged?.(`✅ ${updated.display_name} a validé "${updated.title}" (+${updated.points} pts)`);
+      try {
+        const updated = reviewDailyAssignment(this.db, {
+          assignmentId: numericId,
+          action: 'approve',
+          reviewerId: interaction.user.username,
+        });
+        const approvedEmbed = baseEmbed
+          .setColor(0x10b981)
+          .setFooter({ text: `✅ Validé par ${interaction.user.username} (+${updated.points} pts crédités)` });
+        await interaction.update({ embeds: [approvedEmbed], components: [] });
+        this.onStateChanged?.(`✅ ${updated.display_name} a validé "${updated.title}" (+${updated.points} pts)`);
+      } catch (err: unknown) {
+        await interaction.message.edit({ components: [] }).catch(() => {});
+        await interaction.reply({ content: `ℹ️ ${errorMessage(err)}`, ephemeral: true });
+      }
       return;
     }
 
     if (prefix === 'hgw_feat_approve') {
-      const updated = reviewFeaturedSubmission(this.db, {
-        submissionId: numericId,
-        action: 'approve',
-        reviewerId: interaction.user.username,
-      });
-      const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-        .setColor(0x10b981)
-        .setFooter({
+      try {
+        const updated = reviewFeaturedSubmission(this.db, {
+          submissionId: numericId,
+          action: 'approve',
+          reviewerId: interaction.user.username,
+        });
+        const approvedEmbed = baseEmbed.setColor(0x10b981).setFooter({
           text: `✅ Validé par ${interaction.user.username}${updated.points_awarded ? ` (+${updated.points_awarded} pts)` : ' (classement mis à jour)'}`,
         });
-      await interaction.update({ embeds: [approvedEmbed], components: [] });
-      this.onStateChanged?.(`✅ ${updated.display_name} a validé ${updated.item_code} · ${updated.item_name}`);
+        await interaction.update({ embeds: [approvedEmbed], components: [] });
+        this.onStateChanged?.(`✅ ${updated.display_name} a validé ${updated.item_code} · ${updated.item_name}`);
+      } catch (err: unknown) {
+        await interaction.message.edit({ components: [] }).catch(() => {});
+        await interaction.reply({ content: `ℹ️ ${errorMessage(err)}`, ephemeral: true });
+      }
       return;
     }
 
@@ -293,7 +339,7 @@ export class HgwDiscordBot {
     }
   }
 
-  private async handleModalSubmit(interaction: any): Promise<void> {
+  private async handleModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
     const [prefix, rawId] = (interaction.customId || '').split(':');
     if (prefix !== 'hgw_reject_modal' && prefix !== 'hgw_feat_reject_modal') return;
 
@@ -303,34 +349,47 @@ export class HgwDiscordBot {
     }
 
     const numericId = Number.parseInt(rawId, 10);
+    if (!Number.isFinite(numericId)) return;
     const reason = interaction.fields.getTextInputValue('reject_reason')?.trim() || 'Preuve non conforme';
 
-    const updated =
-      prefix === 'hgw_feat_reject_modal'
-        ? reviewFeaturedSubmission(this.db, {
-            submissionId: numericId,
-            action: 'reject',
-            reviewerId: interaction.user.username,
-            rejectReason: reason,
-          })
-        : reviewDailyAssignment(this.db, {
-            assignmentId: numericId,
-            action: 'reject',
-            reviewerId: interaction.user.username,
-            rejectReason: reason,
-          });
+    let updated: { display_name?: string };
+    try {
+      updated =
+        prefix === 'hgw_feat_reject_modal'
+          ? reviewFeaturedSubmission(this.db, {
+              submissionId: numericId,
+              action: 'reject',
+              reviewerId: interaction.user.username,
+              rejectReason: reason,
+            })
+          : reviewDailyAssignment(this.db, {
+              assignmentId: numericId,
+              action: 'reject',
+              reviewerId: interaction.user.username,
+              rejectReason: reason,
+            });
+    } catch (err: unknown) {
+      if (interaction.message) {
+        await interaction.message.edit({ components: [] }).catch(() => {});
+      }
+      await interaction.reply({ content: `ℹ️ ${errorMessage(err)}`, ephemeral: true });
+      return;
+    }
 
     if (interaction.message) {
-      const rejectedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+      const baseEmbed = interaction.message.embeds[0]
+        ? EmbedBuilder.from(interaction.message.embeds[0])
+        : new EmbedBuilder().setTitle(`Preuve #${numericId}`);
+      const rejectedEmbed = baseEmbed
         .setColor(0xef4444)
-        .addFields({ name: '❌ Motif du refus', value: reason })
+        .addFields({ name: '❌ Motif du refus', value: reason.slice(0, 1000) })
         .setFooter({ text: `❌ Refusé par ${interaction.user.username} (le joueur peut re-soumettre)` });
-      await interaction.message.edit({ embeds: [rejectedEmbed], components: [] });
+      await interaction.message.edit({ embeds: [rejectedEmbed], components: [] }).catch(() => {});
     }
 
     this.onStateChanged?.(`Preuve #${numericId} mise à jour`);
     await interaction.reply({
-      content: `❌ Preuve #${numericId} de **${updated.display_name}** refusée (${reason}).`,
+      content: `❌ Preuve #${numericId} de **${updated.display_name || 'Joueur'}** refusée (${reason}).`,
       ephemeral: true,
     });
   }
@@ -338,7 +397,7 @@ export class HgwDiscordBot {
   /**
    * Poste un embed dans `#preuves` pour un défi quotidien.
    */
-  public async notifyProofSubmitted(assignment: any): Promise<string | null> {
+  public async notifyProofSubmitted(assignment: DailyAssignmentDetailRow): Promise<string | null> {
     const channelId = process.env.DISCORD_PROOFS_CHANNEL_ID?.trim();
     if (!this.client || !this.isReady || !channelId) return null;
 
@@ -353,7 +412,7 @@ export class HgwDiscordBot {
         .setTitle(`${assignment.game_emoji} Preuve Défi #${assignment.id} — ${assignment.title}`)
         .setColor(0xf59e0b)
         .addFields(
-          { name: 'Joueur', value: `**${assignment.display_name}**`, inline: true },
+          { name: 'Joueur', value: `**${assignment.display_name || 'Joueur'}**`, inline: true },
           { name: 'Jeu', value: assignment.game_name, inline: true },
           { name: 'Difficulté & Points', value: `**${diffLabel}**`, inline: true },
           { name: 'Objectif', value: assignment.description }
@@ -388,8 +447,8 @@ export class HgwDiscordBot {
       const sent = await channel.send({ embeds: [embed], files, components: [row] });
       this.db.prepare(`UPDATE daily_assignments SET discord_message_id = ? WHERE id = ?`).run(sent.id, assignment.id);
       return sent.id;
-    } catch (err: any) {
-      console.error('⚠️ [Discord Bot] Échec envoi embed #preuves:', err?.message || err);
+    } catch (err: unknown) {
+      console.error('⚠️ [Discord Bot] Échec envoi embed #preuves:', errorMessage(err));
       return null;
     }
   }
@@ -397,7 +456,7 @@ export class HgwDiscordBot {
   /**
    * Poste un embed dans `#preuves` pour une preuve Jeu Vedette (connecteur standard).
    */
-  public async notifyFeaturedProofSubmitted(sub: any): Promise<string | null> {
+  public async notifyFeaturedProofSubmitted(sub: FeaturedSubmissionDetailRow): Promise<string | null> {
     const channelId = process.env.DISCORD_PROOFS_CHANNEL_ID?.trim();
     if (!this.client || !this.isReady || !channelId) return null;
 
@@ -447,13 +506,13 @@ export class HgwDiscordBot {
       const sent = await channel.send({ embeds: [embed], files, components: [row] });
       this.db.prepare(`UPDATE featured_submissions SET discord_message_id = ? WHERE id = ?`).run(sent.id, sub.id);
       return sent.id;
-    } catch (err: any) {
-      console.error('⚠️ [Discord Bot] Échec envoi embed vedette #preuves:', err?.message || err);
+    } catch (err: unknown) {
+      console.error('⚠️ [Discord Bot] Échec envoi embed vedette #preuves:', errorMessage(err));
       return null;
     }
   }
 
-  public async announceTeams(tournament: any, teams: any[]): Promise<boolean> {
+  public async announceTeams(tournament: TournamentRow, teams: AnnouncedTeam[]): Promise<boolean> {
     const channelId =
       process.env.DISCORD_ANNOUNCE_CHANNEL_ID?.trim() || process.env.DISCORD_PROOFS_CHANNEL_ID?.trim();
     if (!this.client || !this.isReady || !channelId) return false;
@@ -470,19 +529,27 @@ export class HgwDiscordBot {
         )
         .setTimestamp();
 
-      for (const t of teams) {
-        const list = t.members.map((m: any) => `• **${m.display_name}** *(Chapeau ${m.pool})*`).join('\n');
+      const visibleTeams = teams.slice(0, 24);
+      for (const t of visibleTeams) {
+        const list = t.members.map((m) => `• **${m.display_name}** *(Chapeau ${m.pool})*`).join('\n');
         embed.addFields({
           name: `${t.teamName} (Moy. Chapeau ${t.averagePool})`,
           value: list || 'Aucun joueur',
           inline: true,
         });
       }
+      if (teams.length > visibleTeams.length) {
+        embed.addFields({
+          name: 'Autres équipes',
+          value: `+${teams.length - visibleTeams.length} équipe(s) supplémentaire(s) visibles sur le site.`,
+          inline: false,
+        });
+      }
 
       await channel.send({ embeds: [embed] });
       return true;
-    } catch (err: any) {
-      console.error('⚠️ [Discord Bot] Échec annonce équipes:', err?.message || err);
+    } catch (err: unknown) {
+      console.error('⚠️ [Discord Bot] Échec annonce équipes:', errorMessage(err));
       return false;
     }
   }

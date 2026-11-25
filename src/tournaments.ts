@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { getEventConfig } from './config.js';
 import { slugify } from './catalog.js';
+import type { TournamentRegistrationDetailRow, TournamentRow } from './types.js';
 
 // ============================================================================
 // TOURNOIS DU WEEK-END — CRUD + CHAPEAUX + ÉQUIPES + SCORING DIRECT / MANCHES
@@ -31,6 +32,17 @@ export interface TournamentInput {
   status?: 'upcoming' | 'checkin' | 'live' | 'completed';
   active?: boolean | number;
   sort_order?: number;
+}
+
+export interface HydratedRegistration extends TournamentRegistrationDetailRow {
+  round_scores: number[];
+  fg_shows: number[];
+}
+
+export interface HydratedTournament extends TournamentRow {
+  points_scale: Record<string, number>;
+  round_presets: RoundPreset[];
+  registrations: HydratedRegistration[];
 }
 
 const TEAM_NAMES = [
@@ -84,7 +96,8 @@ function normalizePointsScale(raw: unknown, fallback: Record<string, number>): R
 function normalizePresets(raw: unknown): RoundPreset[] {
   if (!Array.isArray(raw)) return [];
   return raw
-    .filter((p) => p && String(p.label || '').trim() !== '' && Number.isFinite(Number(p.points)))
+    .filter((p): p is { label?: unknown; points?: unknown } => Boolean(p && typeof p === 'object'))
+    .filter((p) => String(p.label || '').trim() !== '' && Number.isFinite(Number(p.points)))
     .map((p) => ({
       label: String(p.label).trim().slice(0, 30),
       points: Math.max(0, Math.min(1000, Math.trunc(Number(p.points)))),
@@ -100,16 +113,16 @@ function uniqueTournamentId(db: Database.Database, base: string): string {
   return id;
 }
 
-export function hydrateTournament(row: any, registrations: any[] = []) {
+export function hydrateTournament(row: TournamentRow, registrations: TournamentRegistrationDetailRow[] = []): HydratedTournament {
   let points_scale: Record<string, number> = {};
   let round_presets: RoundPreset[] = [];
   try {
-    points_scale = JSON.parse(row.points_scale_json || '{}');
+    points_scale = JSON.parse(row.points_scale_json || '{}') as Record<string, number>;
   } catch {
     points_scale = {};
   }
   try {
-    round_presets = JSON.parse(row.round_presets_json || '[]');
+    round_presets = JSON.parse(row.round_presets_json || '[]') as RoundPreset[];
   } catch {
     round_presets = [];
   }
@@ -124,7 +137,7 @@ export function hydrateTournament(row: any, registrations: any[] = []) {
     registrations: registrations.map((r) => {
       let roundScores: number[] = [];
       try {
-        const parsed = JSON.parse(r.round_scores_json || r.fg_shows_json || '[]');
+        const parsed: unknown = JSON.parse(r.round_scores_json || r.fg_shows_json || '[]');
         if (Array.isArray(parsed)) roundScores = parsed.map((n) => Number(n) || 0);
       } catch {
         roundScores = [];
@@ -139,14 +152,14 @@ export function hydrateTournament(row: any, registrations: any[] = []) {
   };
 }
 
-export function listTournamentsWithRegistrations(db: Database.Database, includeInactive = false) {
+export function listTournamentsWithRegistrations(db: Database.Database, includeInactive = false): HydratedTournament[] {
   const tournaments = db
     .prepare(
       includeInactive
         ? `SELECT * FROM tournaments ORDER BY sort_order ASC, name ASC`
         : `SELECT * FROM tournaments WHERE active = 1 ORDER BY sort_order ASC, name ASC`
     )
-    .all() as any[];
+    .all() as TournamentRow[];
 
   const allRegs = db
     .prepare(
@@ -155,7 +168,7 @@ export function listTournamentsWithRegistrations(db: Database.Database, includeI
        JOIN users u ON u.id = tr.user_id
        ORDER BY tr.pool ASC, tr.registered_at ASC`
     )
-    .all() as any[];
+    .all() as TournamentRegistrationDetailRow[];
 
   return tournaments.map((t) =>
     hydrateTournament(
@@ -165,7 +178,7 @@ export function listTournamentsWithRegistrations(db: Database.Database, includeI
   );
 }
 
-export function createTournament(db: Database.Database, input: TournamentInput) {
+export function createTournament(db: Database.Database, input: TournamentInput): HydratedTournament {
   const cfg = getEventConfig(db);
   const name = String(input.name || '').trim();
   if (name.length < 2 || name.length > 90) {
@@ -187,9 +200,10 @@ export function createTournament(db: Database.Database, input: TournamentInput) 
   const active = input.active === undefined ? 1 : input.active ? 1 : 0;
 
   const maxOrder = (db.prepare(`SELECT COALESCE(MAX(sort_order), 0) AS m FROM tournaments`).get() as { m: number }).m;
-  const sortOrder = input.sort_order !== undefined && Number.isFinite(Number(input.sort_order))
-    ? Math.trunc(Number(input.sort_order))
-    : maxOrder + 1;
+  const sortOrder =
+    input.sort_order !== undefined && Number.isFinite(Number(input.sort_order))
+      ? Math.trunc(Number(input.sort_order))
+      : maxOrder + 1;
   const id = uniqueTournamentId(db, slugify(input.id || name));
 
   db.prepare(
@@ -216,15 +230,15 @@ export function createTournament(db: Database.Database, input: TournamentInput) 
     sortOrder
   );
 
-  return hydrateTournament(db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(id), []);
+  return hydrateTournament(db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(id) as TournamentRow, []);
 }
 
-export function updateTournament(db: Database.Database, id: string, input: TournamentInput) {
-  const existing = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(id) as any;
+export function updateTournament(db: Database.Database, id: string, input: TournamentInput): HydratedTournament {
+  const existing = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(id) as TournamentRow | undefined;
   if (!existing) throw new Error('Tournoi introuvable.');
 
-  const currentScale = JSON.parse(existing.points_scale_json || '{}');
-  const currentPresets = JSON.parse(existing.round_presets_json || '[]');
+  const currentScale = JSON.parse(existing.points_scale_json || '{}') as Record<string, number>;
+  const currentPresets = JSON.parse(existing.round_presets_json || '[]') as RoundPreset[];
 
   const name = input.name !== undefined ? String(input.name).trim() : existing.name;
   if (name.length < 2 || name.length > 90) {
@@ -291,12 +305,12 @@ export function updateTournament(db: Database.Database, id: string, input: Tourn
        FROM tournament_registrations tr JOIN users u ON u.id = tr.user_id
        WHERE tr.tournament_id = ? ORDER BY tr.pool ASC, tr.registered_at ASC`
     )
-    .all(id);
-  return hydrateTournament(db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(id), regs);
+    .all(id) as TournamentRegistrationDetailRow[];
+  return hydrateTournament(db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(id) as TournamentRow, regs);
 }
 
 export function deleteTournament(db: Database.Database, id: string): { deleted: true } {
-  const existing = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(id);
+  const existing = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(id) as TournamentRow | undefined;
   if (!existing) throw new Error('Tournoi introuvable.');
 
   const regs = (
@@ -317,7 +331,7 @@ export function deleteTournament(db: Database.Database, id: string): { deleted: 
 }
 
 /**
- * Met à jour le chapeau, la présence, et/ou l'équipe manuelle d'un joueur inscrit à un tournoi.
+ * Met à jour atomiquement le chapeau, la présence, et/ou l'équipe manuelle d'un joueur inscrit à un tournoi.
  */
 export function updateTournamentPlayer(
   db: Database.Database,
@@ -331,41 +345,44 @@ export function updateTournamentPlayer(
   }
 ): void {
   const reg = db
-    .prepare(`SELECT * FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`)
+    .prepare(`SELECT 1 FROM tournament_registrations WHERE tournament_id = ? AND user_id = ?`)
     .get(tournamentId, params.userId);
   if (!reg) throw new Error('Inscription introuvable pour ce joueur.');
 
-  if (params.pool !== undefined) {
-    const p = Number(params.pool);
-    if ([1, 2, 3].includes(p)) {
-      db.prepare(`UPDATE tournament_registrations SET pool = ? WHERE tournament_id = ? AND user_id = ?`).run(
-        p,
+  const tx = db.transaction(() => {
+    if (params.pool !== undefined) {
+      const p = Number(params.pool);
+      if ([1, 2, 3].includes(p)) {
+        db.prepare(`UPDATE tournament_registrations SET pool = ? WHERE tournament_id = ? AND user_id = ?`).run(
+          p,
+          tournamentId,
+          params.userId
+        );
+      }
+    }
+    if (params.checkedIn !== undefined) {
+      db.prepare(`UPDATE tournament_registrations SET checked_in = ? WHERE tournament_id = ? AND user_id = ?`).run(
+        params.checkedIn ? 1 : 0,
         tournamentId,
         params.userId
       );
     }
-  }
-  if (params.checkedIn !== undefined) {
-    db.prepare(`UPDATE tournament_registrations SET checked_in = ? WHERE tournament_id = ? AND user_id = ?`).run(
-      params.checkedIn ? 1 : 0,
-      tournamentId,
-      params.userId
-    );
-  }
-  if (params.teamNumber !== undefined) {
-    if (params.teamNumber === null || Number(params.teamNumber) <= 0) {
-      db.prepare(
-        `UPDATE tournament_registrations SET team_number = NULL, team_name = NULL WHERE tournament_id = ? AND user_id = ?`
-      ).run(tournamentId, params.userId);
-    } else {
-      const tNum = Math.max(1, Math.min(20, Math.trunc(Number(params.teamNumber))));
-      const tName =
-        (params.teamName && String(params.teamName).trim()) || TEAM_NAMES[tNum - 1] || `Équipe #${tNum}`;
-      db.prepare(
-        `UPDATE tournament_registrations SET team_number = ?, team_name = ? WHERE tournament_id = ? AND user_id = ?`
-      ).run(tNum, tName, tournamentId, params.userId);
+    if (params.teamNumber !== undefined) {
+      if (params.teamNumber === null || Number(params.teamNumber) <= 0) {
+        db.prepare(
+          `UPDATE tournament_registrations SET team_number = NULL, team_name = NULL WHERE tournament_id = ? AND user_id = ?`
+        ).run(tournamentId, params.userId);
+      } else {
+        const tNum = Math.max(1, Math.min(20, Math.trunc(Number(params.teamNumber))));
+        const tName =
+          (params.teamName && String(params.teamName).trim().slice(0, 50)) || TEAM_NAMES[tNum - 1] || `Équipe #${tNum}`;
+        db.prepare(
+          `UPDATE tournament_registrations SET team_number = ?, team_name = ? WHERE tournament_id = ? AND user_id = ?`
+        ).run(tNum, tName, tournamentId, params.userId);
+      }
     }
-  }
+  });
+  tx();
 }
 
 /**
@@ -377,7 +394,7 @@ export function generateBalancedTeams(
   tournamentId: string,
   onlyCheckedIn = true
 ): {
-  tournament: any;
+  tournament: TournamentRow;
   teams: {
     teamNumber: number;
     teamName: string;
@@ -385,7 +402,7 @@ export function generateBalancedTeams(
     members: { user_id: string; display_name: string; avatar: string | null; pool: number }[];
   }[];
 } {
-  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(tournamentId) as any;
+  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(tournamentId) as TournamentRow | undefined;
   if (!tournament) throw new Error('Tournoi introuvable.');
 
   const teamSize = Math.max(2, tournament.team_size || 2);
@@ -466,6 +483,44 @@ export function generateBalancedTeams(
   };
 }
 
+function applyTournamentPlacementsInternal(
+  db: Database.Database,
+  tournament: TournamentRow,
+  placements: { userId: string; placement: number }[]
+): void {
+  const scale = JSON.parse(tournament.points_scale_json) as Record<string, number>;
+  for (const item of placements) {
+    const rank = Math.trunc(Number(item.placement));
+    if (!Number.isFinite(rank) || rank <= 0) continue;
+    const pts = scale[String(rank)] ?? scale.default ?? 0;
+
+    db.prepare(
+      `UPDATE tournament_registrations
+       SET placement = ?, points_awarded = ?
+       WHERE tournament_id = ? AND user_id = ?`
+    ).run(rank, pts, tournament.id, item.userId);
+
+    const sourceRef = `tournament:${tournament.id}:${item.userId}`;
+    if (pts > 0) {
+      db.prepare(
+        `INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label, updated_at)
+         VALUES (?, 'tournament', ?, 'live', ?, ?, datetime('now'))
+         ON CONFLICT(source_ref) DO UPDATE SET
+           points = excluded.points,
+           label = excluded.label,
+           updated_at = datetime('now')`
+      ).run(
+        item.userId,
+        sourceRef,
+        pts,
+        `${tournament.emoji} ${tournament.name} — Place #${rank} (+${pts} pts)`
+      );
+    } else {
+      db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(sourceRef);
+    }
+  }
+}
+
 /**
  * Attribue le classement final d'un tournoi et crédite `points_ledger` en catégorie `live`.
  */
@@ -474,56 +529,25 @@ export function recordTournamentPlacements(
   tournamentId: string,
   placements: { userId: string; placement: number }[]
 ): void {
-  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(tournamentId) as any;
+  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(tournamentId) as TournamentRow | undefined;
   if (!tournament) throw new Error('Tournoi introuvable.');
 
-  const scale = JSON.parse(tournament.points_scale_json) as Record<string, number>;
-
   const tx = db.transaction(() => {
-    for (const item of placements) {
-      const rank = item.placement;
-      const pts = scale[String(rank)] ?? scale.default ?? 0;
-
-      db.prepare(
-        `UPDATE tournament_registrations
-         SET placement = ?, points_awarded = ?
-         WHERE tournament_id = ? AND user_id = ?`
-      ).run(rank, pts, tournamentId, item.userId);
-
-      const sourceRef = `tournament:${tournamentId}:${item.userId}`;
-      if (pts > 0) {
-        db.prepare(
-          `INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label, updated_at)
-           VALUES (?, 'tournament', ?, 'live', ?, ?, datetime('now'))
-           ON CONFLICT(source_ref) DO UPDATE SET
-             points = excluded.points,
-             label = excluded.label,
-             updated_at = datetime('now')`
-        ).run(
-          item.userId,
-          sourceRef,
-          pts,
-          `${tournament.emoji} ${tournament.name} — Place #${rank} (+${pts} pts)`
-        );
-      } else {
-        db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(sourceRef);
-      }
-    }
+    applyTournamentPlacementsInternal(db, tournament, placements);
   });
-
   tx();
 }
 
 /**
  * Scoring multi-manches générique (Fall Guys 5 Shows, Mario Kart GP, GeoGuessr N rounds, etc.).
- * Calcule le total des N manches, classe les participants et attribue automatiquement les points HGW.
+ * Calcule le total des N manches, classe les participants présents, purge les absents et crédite les points HGW atomiquement.
  */
 export function updateTournamentRoundScores(
   db: Database.Database,
   tournamentId: string,
   scores: { userId: string; scores: number[] }[]
-): any[] {
-  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(tournamentId) as any;
+): TournamentRegistrationDetailRow[] {
+  const tournament = db.prepare(`SELECT * FROM tournaments WHERE id = ?`).get(tournamentId) as TournamentRow | undefined;
   if (!tournament) throw new Error('Tournoi introuvable.');
 
   const roundsCount = Math.max(1, Math.min(15, Number(tournament.rounds_count || 5)));
@@ -543,27 +567,37 @@ export function updateTournamentRoundScores(
          WHERE tournament_id = ? AND user_id = ?`
       ).run(json, total, json, total, tournamentId, entry.userId);
     }
+
+    // Purger les placements/points des joueurs non présents (checked_in = 0)
+    const unchecked = db
+      .prepare(`SELECT user_id FROM tournament_registrations WHERE tournament_id = ? AND checked_in = 0`)
+      .all(tournamentId) as { user_id: string }[];
+    for (const u of unchecked) {
+      db.prepare(
+        `UPDATE tournament_registrations SET placement = NULL, points_awarded = 0 WHERE tournament_id = ? AND user_id = ?`
+      ).run(tournamentId, u.user_id);
+      db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(`tournament:${tournamentId}:${u.user_id}`);
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT tr.user_id
+         FROM tournament_registrations tr
+         WHERE tr.tournament_id = ? AND tr.checked_in = 1
+         ORDER BY tr.round_total_score DESC, tr.registered_at ASC`
+      )
+      .all(tournamentId) as { user_id: string }[];
+
+    const placements = rows.map((r, idx) => ({
+      userId: r.user_id,
+      placement: idx + 1,
+    }));
+
+    if (placements.length > 0) {
+      applyTournamentPlacementsInternal(db, tournament, placements);
+    }
   });
   tx();
-
-  const rows = db
-    .prepare(
-      `SELECT tr.*, u.display_name, u.avatar
-       FROM tournament_registrations tr
-       JOIN users u ON u.id = tr.user_id
-       WHERE tr.tournament_id = ? AND tr.checked_in = 1
-       ORDER BY tr.round_total_score DESC, tr.registered_at ASC`
-    )
-    .all(tournamentId) as any[];
-
-  const placements = rows.map((r, idx) => ({
-    userId: r.user_id,
-    placement: idx + 1,
-  }));
-
-  if (placements.length > 0) {
-    recordTournamentPlacements(db, tournamentId, placements);
-  }
 
   return db
     .prepare(
@@ -573,5 +607,5 @@ export function updateTournamentRoundScores(
        WHERE tr.tournament_id = ?
        ORDER BY tr.round_total_score DESC, tr.registered_at ASC`
     )
-    .all(tournamentId);
+    .all(tournamentId) as TournamentRegistrationDetailRow[];
 }

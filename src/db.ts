@@ -70,7 +70,19 @@ function migrateLegacyTmnfToFeatured(db: Database.Database): void {
     .get();
   if (!hasLegacyMaps) return;
 
-  const legacyMaps = db.prepare(`SELECT * FROM tmnf_maps ORDER BY sort_order ASC`).all() as any[];
+  const legacyMaps = db.prepare(`SELECT * FROM tmnf_maps ORDER BY sort_order ASC`).all() as {
+    id: string;
+    code: string;
+    name: string;
+    uid: string;
+    environment?: string;
+    is_weekly: number;
+    author_ms: number;
+    gold_ms: number;
+    silver_ms: number;
+    bronze_ms: number;
+    sort_order: number;
+  }[];
   if (legacyMaps.length === 0) return;
 
   const tx = db.transaction(() => {
@@ -94,7 +106,18 @@ function migrateLegacyTmnfToFeatured(db: Database.Database): void {
       .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tmnf_submissions'`)
       .get();
     if (hasLegacySubs) {
-      const legacySubs = db.prepare(`SELECT * FROM tmnf_submissions ORDER BY id ASC`).all() as any[];
+      const legacySubs = db.prepare(`SELECT * FROM tmnf_submissions ORDER BY id ASC`).all() as {
+        user_id: string;
+        map_id: string;
+        time_ms: number;
+        medal: string;
+        points_awarded: number;
+        replay_sha256: string;
+        player_login: string;
+        player_nickname: string | null;
+        file_name: string;
+        created_at: string;
+      }[];
       const insSub = db.prepare(`
         INSERT OR IGNORE INTO featured_submissions (
           user_id, item_id, metric_value, tier_key, points_awarded, status,

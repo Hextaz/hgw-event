@@ -1,7 +1,21 @@
 import type Database from 'better-sqlite3';
-import { getEventConfig, type FeaturedConfig, type FeaturedTier, type MetricType } from './config.js';
+import {
+  getEventConfig,
+  isPlayablePhase,
+  normalizeProofUrl,
+  type FeaturedConfig,
+  type FeaturedTier,
+  type MetricType,
+} from './config.js';
 import { formatTmTime, parseReplayGbx } from './gbx.js';
 import { slugify } from './catalog.js';
+import type {
+  FeaturedItemRow,
+  FeaturedLadderEntry,
+  FeaturedSubmissionDetailRow,
+  HydratedFeaturedItem,
+  UserRow,
+} from './types.js';
 
 // ============================================================================
 // JEU VEDETTE MODULAIRE (0 ou 1 jeu par édition)
@@ -70,16 +84,21 @@ function uniqueFeaturedItemId(db: Database.Database, base: string): string {
   return id;
 }
 
-export function hydrateFeaturedItem(row: any, cfg: FeaturedConfig) {
-  let thresholds: Record<string, number> = {};
-  let metadata: Record<string, any> = {};
+function parseThresholdsJson(raw?: string): Record<string, number> {
   try {
-    thresholds = JSON.parse(row.thresholds_json || '{}');
+    const parsed = JSON.parse(raw || '{}');
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, number>) : {};
   } catch {
-    thresholds = {};
+    return {};
   }
+}
+
+export function hydrateFeaturedItem(row: FeaturedItemRow, cfg: FeaturedConfig): HydratedFeaturedItem {
+  const thresholds = parseThresholdsJson(row.thresholds_json);
+  let metadata: Record<string, unknown> = {};
   try {
-    metadata = JSON.parse(row.metadata_json || '{}');
+    const parsed = JSON.parse(row.metadata_json || '{}');
+    if (parsed && typeof parsed === 'object') metadata = parsed as Record<string, unknown>;
   } catch {
     metadata = {};
   }
@@ -88,6 +107,7 @@ export function hydrateFeaturedItem(row: any, cfg: FeaturedConfig) {
   const goldMs = thresholds.gold ?? 0;
   const silverMs = thresholds.silver ?? 0;
   const bronzeMs = thresholds.bronze ?? 0;
+  const environment = typeof metadata.environment === 'string' && metadata.environment ? metadata.environment : 'Stadium';
 
   return {
     ...row,
@@ -96,7 +116,7 @@ export function hydrateFeaturedItem(row: any, cfg: FeaturedConfig) {
     // Compatibilité TMNF pour l'UI existante et les tests
     uid: row.external_uid || '',
     is_weekly: row.is_ladder ? 1 : 0,
-    environment: metadata.environment || 'Stadium',
+    environment,
     author_ms: authorMs,
     gold_ms: goldMs,
     silver_ms: silverMs,
@@ -115,7 +135,7 @@ export function hydrateFeaturedItem(row: any, cfg: FeaturedConfig) {
 // CRUD ADMIN DES ÉPREUVES DU JEU VEDETTE
 // ---------------------------------------------------------------------------
 
-export function listFeaturedItems(db: Database.Database, includeInactive = false) {
+export function listFeaturedItems(db: Database.Database, includeInactive = false): HydratedFeaturedItem[] {
   const cfg = getEventConfig(db).featured;
   const rows = db
     .prepare(
@@ -130,23 +150,28 @@ export function listFeaturedItems(db: Database.Database, includeInactive = false
            WHERE fi.active = 1
            ORDER BY fi.is_ladder DESC, fi.sort_order ASC, fi.name ASC`
     )
-    .all() as any[];
+    .all() as FeaturedItemRow[];
 
-  const orderSql = cfg.metric_type === 'time_asc' ? 'MIN(f2.metric_value)' : 'MAX(f2.metric_value)';
-  const wrRows = db
-    .prepare(
-      `SELECT fs.item_id, fs.metric_value, u.display_name
-       FROM featured_submissions fs
-       JOIN users u ON u.id = fs.user_id
-       WHERE fs.status = 'validated'
-         AND fs.metric_value = (
-           SELECT ${orderSql} FROM featured_submissions f2
-           WHERE f2.item_id = fs.item_id AND f2.status = 'validated'
-         )
-       GROUP BY fs.item_id`
-    )
-    .all() as { item_id: string; metric_value: number; display_name: string }[];
-  const wrMap = new Map(wrRows.map((r) => [r.item_id, r]));
+  const wrMap = new Map<string, { item_id: string; metric_value: number; display_name: string }>();
+  if (cfg.metric_type !== 'binary') {
+    const orderSql = cfg.metric_type === 'time_asc' ? 'MIN(f2.metric_value)' : 'MAX(f2.metric_value)';
+    const wrRows = db
+      .prepare(
+        `SELECT fs.item_id, fs.metric_value, u.display_name
+         FROM featured_submissions fs
+         JOIN users u ON u.id = fs.user_id
+         WHERE fs.status = 'validated'
+           AND fs.metric_value = (
+             SELECT ${orderSql} FROM featured_submissions f2
+             WHERE f2.item_id = fs.item_id AND f2.status = 'validated'
+           )
+         ORDER BY fs.id ASC`
+      )
+      .all() as { item_id: string; metric_value: number; display_name: string }[];
+    for (const r of wrRows) {
+      if (!wrMap.has(r.item_id)) wrMap.set(r.item_id, r);
+    }
+  }
 
   return rows.map((row) => {
     const h = hydrateFeaturedItem(row, cfg);
@@ -172,7 +197,7 @@ function normalizeThresholds(raw: unknown): Record<string, number> {
   return out;
 }
 
-export function createFeaturedItem(db: Database.Database, input: FeaturedItemInput) {
+export function createFeaturedItem(db: Database.Database, input: FeaturedItemInput): HydratedFeaturedItem {
   const cfg = getEventConfig(db).featured;
   const code = String(input.code || '').trim().slice(0, 40);
   const name = String(input.name || '').trim().slice(0, 100);
@@ -186,7 +211,9 @@ export function createFeaturedItem(db: Database.Database, input: FeaturedItemInp
   const active = input.active === undefined ? 1 : input.active ? 1 : 0;
 
   if (externalUid) {
-    const dup = db.prepare(`SELECT id, name FROM featured_items WHERE external_uid = ?`).get(externalUid) as any;
+    const dup = db.prepare(`SELECT id, name FROM featured_items WHERE external_uid = ?`).get(externalUid) as
+      | { id: string; name: string }
+      | undefined;
     if (dup) throw new Error(`Cet UID (${externalUid}) est déjà utilisé par « ${dup.name} ».`);
   }
 
@@ -203,7 +230,6 @@ export function createFeaturedItem(db: Database.Database, input: FeaturedItemInp
   const id = uniqueFeaturedItemId(db, slugify(input.id || `${isLadder ? 'ladder' : 'stage'}_${finalCode}`));
 
   const tx = db.transaction(() => {
-    // Une seule épreuve Ladder active à la fois pour garder un Top N clair
     if (isLadder && active) {
       db.prepare(`UPDATE featured_items SET is_ladder = 0 WHERE is_ladder = 1`).run();
     }
@@ -212,15 +238,18 @@ export function createFeaturedItem(db: Database.Database, input: FeaturedItemInp
         id, code, name, description, is_ladder, external_uid, thresholds_json, metadata_json, active, sort_order
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(id, finalCode, name, description, isLadder, externalUid, JSON.stringify(thresholds), JSON.stringify(metadata), active, sortOrder);
+    if (isLadder) {
+      syncFeaturedLadderInternal(db);
+    }
   });
   tx();
 
-  return hydrateFeaturedItem(db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(id), cfg);
+  return hydrateFeaturedItem(db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(id) as FeaturedItemRow, cfg);
 }
 
-export function updateFeaturedItem(db: Database.Database, id: string, input: FeaturedItemInput) {
+export function updateFeaturedItem(db: Database.Database, id: string, input: FeaturedItemInput): HydratedFeaturedItem {
   const cfg = getEventConfig(db).featured;
-  const existing = db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(id) as any;
+  const existing = db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(id) as FeaturedItemRow | undefined;
   if (!existing) throw new Error('Épreuve introuvable.');
 
   const name = input.name !== undefined ? String(input.name).trim().slice(0, 100) : existing.name;
@@ -249,7 +278,7 @@ export function updateFeaturedItem(db: Database.Database, id: string, input: Fea
   if (externalUid) {
     const dup = db
       .prepare(`SELECT id, name FROM featured_items WHERE external_uid = ? AND id != ?`)
-      .get(externalUid, id) as any;
+      .get(externalUid, id) as { id: string; name: string } | undefined;
     if (dup) throw new Error(`Cet UID (${externalUid}) est déjà utilisé par « ${dup.name} ».`);
   }
 
@@ -263,14 +292,17 @@ export function updateFeaturedItem(db: Database.Database, id: string, input: Fea
         thresholds_json = ?, metadata_json = ?, active = ?, sort_order = ?
        WHERE id = ?`
     ).run(code, name, description, isLadder, externalUid, thresholdsJson, metadataJson, active, sortOrder, id);
+    if (isLadder || existing.is_ladder) {
+      syncFeaturedLadderInternal(db);
+    }
   });
   tx();
 
-  return hydrateFeaturedItem(db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(id), cfg);
+  return hydrateFeaturedItem(db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(id) as FeaturedItemRow, cfg);
 }
 
 export function deleteFeaturedItem(db: Database.Database, id: string): { deleted: true } {
-  const existing = db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(id);
+  const existing = db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(id) as FeaturedItemRow | undefined;
   if (!existing) throw new Error('Épreuve introuvable.');
   const used = (
     db.prepare(`SELECT COUNT(*) AS c FROM featured_submissions WHERE item_id = ?`).get(id) as { c: number }
@@ -283,13 +315,17 @@ export function deleteFeaturedItem(db: Database.Database, id: string): { deleted
 }
 
 // ---------------------------------------------------------------------------
-// RECALCUL DU LADDER & DU LEDGER POUR LES PALIERS
+// LECTURE PURE & RECALCUL TRANSACTIONNEL DU LADDER ET DES PALIERS
 // ---------------------------------------------------------------------------
 
-export function recalculateFeaturedLadder(db: Database.Database): any[] {
-  const fullCfg = getEventConfig(db);
-  const cfg = fullCfg.featured;
-  const ladderItem = db.prepare(`SELECT * FROM featured_items WHERE is_ladder = 1 AND active = 1 LIMIT 1`).get() as any;
+/**
+ * Lecture pure (CQS) du classement Ladder du jeu vedette : aucune écriture en base.
+ */
+export function getFeaturedLadder(db: Database.Database): FeaturedLadderEntry[] {
+  const cfg = getEventConfig(db).featured;
+  const ladderItem = db.prepare(`SELECT * FROM featured_items WHERE is_ladder = 1 AND active = 1 LIMIT 1`).get() as
+    | FeaturedItemRow
+    | undefined;
   if (!ladderItem || !cfg.enabled || !cfg.ladder_enabled) {
     return [];
   }
@@ -316,29 +352,6 @@ export function recalculateFeaturedLadder(db: Database.Database): any[] {
   }[];
 
   const scale = cfg.ladder_points_scale;
-
-  const tx = db.transaction(() => {
-    db.prepare(`DELETE FROM points_ledger WHERE source_type IN ('tmnf_weekly', 'featured_ladder')`).run();
-    const ins = db.prepare(`
-      INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label)
-      VALUES (?, 'featured_ladder', ?, 'async', ?, ?)
-    `);
-    bestRuns.forEach((run, idx) => {
-      const rank = idx + 1;
-      const pts = rank <= scale.length ? scale[rank - 1] : 0;
-      if (pts > 0) {
-        const formatted = formatMetricValue(run.best_value, cfg.metric_type, cfg.metric_unit);
-        ins.run(
-          run.user_id,
-          `featured_ladder:${run.user_id}`,
-          pts,
-          `⏱️ ${cfg.title} ${cfg.ladder_title} — #${rank} (${formatted})`
-        );
-      }
-    });
-  });
-  tx();
-
   return bestRuns.map((r, i) => ({
     rank: i + 1,
     user_id: r.user_id,
@@ -353,33 +366,79 @@ export function recalculateFeaturedLadder(db: Database.Database): any[] {
   }));
 }
 
-function syncUserStageLedger(db: Database.Database, userId: string, item: any, cfg: FeaturedConfig): void {
-  const aggFn = cfg.metric_type === 'time_asc' ? 'MIN(metric_value)' : 'MAX(metric_value)';
-  const row = db
-    .prepare(
-      `SELECT ${aggFn} AS best_val, MAX(points_awarded) AS max_pts
-       FROM featured_submissions
-       WHERE user_id = ? AND item_id = ? AND status = 'validated'`
-    )
-    .get(userId, item.id) as { best_val: number | null; max_pts: number | null };
+/**
+ * Synchronise le ledger du ladder sans ouvrir de transaction autonome (utilisable dans une transaction appelante).
+ * Purge systématiquement les points ladder si le jeu vedette ou le ladder est désactivé.
+ */
+function syncFeaturedLadderInternal(db: Database.Database): FeaturedLadderEntry[] {
+  const cfg = getEventConfig(db).featured;
+  const entries = getFeaturedLadder(db);
 
+  db.prepare(`DELETE FROM points_ledger WHERE source_type IN ('tmnf_weekly', 'featured_ladder')`).run();
+  if (entries.length === 0) return [];
+
+  const ins = db.prepare(`
+    INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label)
+    VALUES (?, 'featured_ladder', ?, 'async', ?, ?)
+  `);
+  for (const entry of entries) {
+    if (entry.projected_points > 0) {
+      ins.run(
+        entry.user_id,
+        `featured_ladder:${entry.user_id}`,
+        entry.projected_points,
+        `⏱️ ${cfg.title} ${cfg.ladder_title} — #${entry.rank} (${entry.formatted_value})`
+      );
+    }
+  }
+  return entries;
+}
+
+export function recalculateFeaturedLadder(db: Database.Database): FeaturedLadderEntry[] {
+  const tx = db.transaction(() => syncFeaturedLadderInternal(db));
+  return tx();
+}
+
+function syncUserStageLedger(
+  db: Database.Database,
+  userId: string,
+  item: Pick<FeaturedItemRow, 'id' | 'code' | 'name' | 'thresholds_json'>,
+  cfg: FeaturedConfig
+): void {
   const sourceRef = `featured_stage:${userId}:${item.id}`;
   const legacyRef = `tmnf_medal:${userId}:${item.id}`;
-  // Nettoyage de l'éventuelle ancienne clé legacy pour éviter tout double comptage
   db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(legacyRef);
 
-  const pts = row?.max_pts || 0;
-  if (pts <= 0 || row?.best_val === null) {
+  if (!cfg.enabled || !cfg.stages_enabled) {
     db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(sourceRef);
     return;
   }
 
-  const thresholds = JSON.parse(item.thresholds_json || '{}');
+  const aggFn = cfg.metric_type === 'time_asc' ? 'MIN(metric_value)' : 'MAX(metric_value)';
+  const row = db
+    .prepare(
+      `SELECT ${aggFn} AS best_val
+       FROM featured_submissions
+       WHERE user_id = ? AND item_id = ? AND status = 'validated'`
+    )
+    .get(userId, item.id) as { best_val: number | null } | undefined;
+
+  if (!row || row.best_val === null) {
+    db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(sourceRef);
+    return;
+  }
+
+  const thresholds = parseThresholdsJson(item.thresholds_json);
   const evalRes = evaluateFeaturedTier(row.best_val, thresholds, cfg.tiers, cfg.metric_type);
+  if (evalRes.points <= 0) {
+    db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(sourceRef);
+    return;
+  }
+
   const valStr = formatMetricValue(row.best_val, cfg.metric_type, cfg.metric_unit);
   const label =
     cfg.metric_type === 'binary'
-      ? `🏅 ${cfg.title} ${item.code} — ${item.name} (+${pts} pts)`
+      ? `🏅 ${cfg.title} ${item.code} — ${item.name} (+${evalRes.points} pts)`
       : `🏅 ${cfg.title} ${item.code} — ${evalRes.tierLabel} (${valStr})`;
 
   db.prepare(
@@ -389,7 +448,32 @@ function syncUserStageLedger(db: Database.Database, userId: string, item: any, c
        points = excluded.points,
        label = excluded.label,
        updated_at = datetime('now')`
-  ).run(userId, sourceRef, pts, label);
+  ).run(userId, sourceRef, evalRes.points, label);
+}
+
+/**
+ * Recalcule l'ensemble des points de paliers (Bloc A) après un changement de configuration admin.
+ */
+export function recalculateAllFeaturedStages(db: Database.Database): void {
+  const cfg = getEventConfig(db).featured;
+  const tx = db.transaction(() => {
+    if (!cfg.enabled || !cfg.stages_enabled) {
+      db.prepare(`DELETE FROM points_ledger WHERE source_type IN ('tmnf_medal', 'featured_stage')`).run();
+      return;
+    }
+    const pairs = db
+      .prepare(
+        `SELECT DISTINCT fs.user_id, fi.id, fi.code, fi.name, fi.thresholds_json
+         FROM featured_submissions fs
+         JOIN featured_items fi ON fi.id = fs.item_id
+         WHERE fi.is_ladder = 0`
+      )
+      .all() as (Pick<FeaturedItemRow, 'id' | 'code' | 'name' | 'thresholds_json'> & { user_id: string })[];
+    for (const p of pairs) {
+      syncUserStageLedger(db, p.user_id, p, cfg);
+    }
+  });
+  tx();
 }
 
 // ---------------------------------------------------------------------------
@@ -405,16 +489,22 @@ export function submitFeaturedStandard(
     proofUrl?: string;
     proofFile?: string;
     proofNote?: string;
-  }
-): any {
-  const lifecycle = getEventConfig(db);
+  },
+  now: Date = new Date()
+): FeaturedSubmissionDetailRow {
+  const lifecycle = getEventConfig(db, now);
   const cfg = lifecycle.featured;
   if (!cfg.enabled) throw new Error('Le jeu vedette n’est pas activé sur cette édition.');
-  if (lifecycle.effective_phase === 'closed' || lifecycle.effective_phase === 'draft') {
+  if (cfg.connector !== 'standard') {
+    throw new Error('Ce jeu vedette utilise un connecteur automatique : envoyez vos fichiers dédiés.');
+  }
+  if (!isPlayablePhase(lifecycle.effective_phase)) {
     throw new Error('Les soumissions sont fermées pour le moment.');
   }
 
-  const item = db.prepare(`SELECT * FROM featured_items WHERE id = ? AND active = 1`).get(params.itemId) as any;
+  const item = db.prepare(`SELECT * FROM featured_items WHERE id = ? AND active = 1`).get(params.itemId) as
+    | FeaturedItemRow
+    | undefined;
   if (!item) throw new Error('Épreuve introuvable ou inactive.');
 
   if (item.is_ladder) {
@@ -425,9 +515,12 @@ export function submitFeaturedStandard(
           : `🔒 Le ${cfg.ladder_title} se débloque à l’Acte ${cfg.ladder_unlock_act}.`
       );
     }
+  } else if (!cfg.stages_enabled) {
+    throw new Error('Les épreuves à paliers ne sont pas activées sur cette édition.');
   }
 
-  if (!params.proofFile && !params.proofUrl) {
+  const safeProofUrl = normalizeProofUrl(params.proofUrl);
+  if (!params.proofFile && !safeProofUrl) {
     throw new Error('Veuillez fournir une capture/vidéo ou un lien de preuve.');
   }
 
@@ -444,7 +537,7 @@ export function submitFeaturedStandard(
     metricValue = num;
   }
 
-  const thresholds = JSON.parse(item.thresholds_json || '{}');
+  const thresholds = parseThresholdsJson(item.thresholds_json);
   const evalRes = item.is_ladder
     ? { tierKey: 'ladder', tierLabel: cfg.ladder_title, points: 0 }
     : evaluateFeaturedTier(metricValue, thresholds, cfg.tiers, cfg.metric_type);
@@ -465,9 +558,9 @@ export function submitFeaturedStandard(
       evalRes.tierKey,
       evalRes.points,
       proofType,
-      params.proofUrl || null,
+      safeProofUrl || null,
       params.proofFile || null,
-      params.proofNote || null
+      params.proofNote ? params.proofNote.trim().slice(0, 200) : null
     );
 
   return db
@@ -479,7 +572,7 @@ export function submitFeaturedStandard(
        JOIN users u ON u.id = fs.user_id
        WHERE fs.id = ?`
     )
-    .get(info.lastInsertRowid);
+    .get(info.lastInsertRowid) as FeaturedSubmissionDetailRow;
 }
 
 export function reviewFeaturedSubmission(
@@ -489,50 +582,66 @@ export function reviewFeaturedSubmission(
     action: 'approve' | 'reject';
     reviewerId: string;
     rejectReason?: string;
+    allowOverride?: boolean;
   }
-): any {
+): FeaturedSubmissionDetailRow {
   const cfg = getEventConfig(db).featured;
-  const sub = db
-    .prepare(
-      `SELECT fs.*, fi.code AS item_code, fi.name AS item_name, fi.is_ladder, fi.thresholds_json, u.display_name
-       FROM featured_submissions fs
-       JOIN featured_items fi ON fi.id = fs.item_id
-       JOIN users u ON u.id = fs.user_id
-       WHERE fs.id = ?`
-    )
-    .get(params.submissionId) as any;
-
-  if (!sub) throw new Error(`Preuve vedette #${params.submissionId} introuvable.`);
 
   const tx = db.transaction(() => {
+    const sub = db
+      .prepare(
+        `SELECT fs.*, fi.code AS item_code, fi.name AS item_name, fi.is_ladder, fi.thresholds_json, u.display_name
+         FROM featured_submissions fs
+         JOIN featured_items fi ON fi.id = fs.item_id
+         JOIN users u ON u.id = fs.user_id
+         WHERE fs.id = ?`
+      )
+      .get(params.submissionId) as FeaturedSubmissionDetailRow | undefined;
+
+    if (!sub) throw new Error(`Preuve vedette #${params.submissionId} introuvable.`);
+
+    const statusGuard = params.allowOverride ? '' : ` AND status = 'pending'`;
     if (params.action === 'approve') {
-      const thresholds = JSON.parse(sub.thresholds_json || '{}');
+      const thresholds = parseThresholdsJson(sub.thresholds_json);
       const evalRes = sub.is_ladder
         ? { tierKey: 'ladder', tierLabel: cfg.ladder_title, points: 0 }
         : evaluateFeaturedTier(sub.metric_value, thresholds, cfg.tiers, cfg.metric_type);
 
-      db.prepare(
-        `UPDATE featured_submissions
-         SET status = 'validated', tier_key = ?, points_awarded = ?, reviewer_id = ?, reject_reason = NULL, reviewed_at = datetime('now')
-         WHERE id = ?`
-      ).run(evalRes.tierKey, evalRes.points, params.reviewerId, sub.id);
+      const res = db
+        .prepare(
+          `UPDATE featured_submissions
+           SET status = 'validated', tier_key = ?, points_awarded = ?, reviewer_id = ?, reject_reason = NULL, reviewed_at = datetime('now')
+           WHERE id = ?${statusGuard}`
+        )
+        .run(evalRes.tierKey, evalRes.points, params.reviewerId, sub.id);
+      if (res.changes === 0) {
+        throw new Error(`La preuve vedette #${sub.id} a déjà été traitée (statut : ${sub.status}).`);
+      }
     } else {
-      db.prepare(
-        `UPDATE featured_submissions
-         SET status = 'rejected', reviewer_id = ?, reject_reason = ?, reviewed_at = datetime('now')
-         WHERE id = ?`
-      ).run(params.reviewerId, params.rejectReason || 'Preuve incomplète ou non conforme.', sub.id);
+      const res = db
+        .prepare(
+          `UPDATE featured_submissions
+           SET status = 'rejected', reviewer_id = ?, reject_reason = ?, reviewed_at = datetime('now')
+           WHERE id = ?${statusGuard}`
+        )
+        .run(params.reviewerId, params.rejectReason || 'Preuve incomplète ou non conforme.', sub.id);
+      if (res.changes === 0) {
+        throw new Error(`La preuve vedette #${sub.id} a déjà été traitée (statut : ${sub.status}).`);
+      }
     }
 
-    if (!sub.is_ladder) {
-      syncUserStageLedger(db, sub.user_id, { id: sub.item_id, code: sub.item_code, name: sub.item_name, thresholds_json: sub.thresholds_json }, cfg);
+    if (sub.is_ladder) {
+      syncFeaturedLadderInternal(db);
+    } else {
+      syncUserStageLedger(
+        db,
+        sub.user_id,
+        { id: sub.item_id, code: sub.item_code, name: sub.item_name, thresholds_json: sub.thresholds_json || '{}' },
+        cfg
+      );
     }
   });
   tx();
-
-  if (sub.is_ladder) {
-    recalculateFeaturedLadder(db);
-  }
 
   return db
     .prepare(
@@ -542,7 +651,7 @@ export function reviewFeaturedSubmission(
        JOIN users u ON u.id = fs.user_id
        WHERE fs.id = ?`
     )
-    .get(params.submissionId);
+    .get(params.submissionId) as FeaturedSubmissionDetailRow;
 }
 
 export function listPendingFeaturedProofs(db: Database.Database) {
@@ -557,11 +666,11 @@ export function listPendingFeaturedProofs(db: Database.Database) {
        WHERE fs.status = 'pending'
        ORDER BY fs.created_at ASC`
     )
-    .all() as any[];
+    .all() as FeaturedSubmissionDetailRow[];
 
   return rows.map((r) => ({
     ...r,
-    kind: 'featured',
+    kind: 'featured' as const,
     game_name: cfg.title,
     title: `${r.item_code} · ${r.item_name}`,
     description:
@@ -586,10 +695,20 @@ export function submitTmnfReplay(
     buffer: Buffer;
     fileName: string;
     explicitMapId?: string;
-  }
+  },
+  now: Date = new Date()
 ) {
+  const lifecycle = getEventConfig(db, now);
+  const cfg = lifecycle.featured;
+  if (!cfg.enabled || cfg.connector !== 'tmnf_gbx') {
+    throw new Error('Le connecteur Trackmania (.Replay.gbx) n’est pas actif sur cette édition.');
+  }
+  if (!isPlayablePhase(lifecycle.effective_phase)) {
+    throw new Error('L’événement est clôturé ou en préparation : les dépôts de replays sont fermés.');
+  }
+
   const parsed = parseReplayGbx(params.buffer);
-  if (!parsed.valid || !parsed.bestTimeMs || !parsed.mapUid) {
+  if (!parsed.valid || !parsed.bestTimeMs || !parsed.mapUid || !parsed.playerLogin) {
     throw new Error(parsed.error || 'Replay .gbx invalide.');
   }
 
@@ -602,29 +721,33 @@ export function submitTmnfReplay(
   }
 
   // Anti-triche #2 : Cohérence et unicité du login TMNF
-  const user = db.prepare(`SELECT id, tmnf_login, display_name FROM users WHERE id = ?`).get(params.userId) as any;
+  const user = db.prepare(`SELECT id, tmnf_login, display_name FROM users WHERE id = ?`).get(params.userId) as
+    | Pick<UserRow, 'id' | 'tmnf_login' | 'display_name'>
+    | undefined;
   if (!user) throw new Error('Utilisateur introuvable.');
 
-  if (parsed.playerLogin && parsed.playerLogin !== 'unknown_driver') {
-    const otherOwner = db
-      .prepare(`SELECT id, display_name FROM users WHERE LOWER(tmnf_login) = LOWER(?) AND id != ?`)
-      .get(parsed.playerLogin, params.userId) as { id: string; display_name: string } | undefined;
-    if (otherOwner) {
-      throw new Error(
-        `Anti-Triche : Le compte Trackmania "${parsed.playerLogin}" appartient déjà au joueur "${otherOwner.display_name}". Partage de replay interdit.`
-      );
-    }
+  const otherOwner = db
+    .prepare(`SELECT id, display_name FROM users WHERE LOWER(tmnf_login) = LOWER(?) AND id != ?`)
+    .get(parsed.playerLogin, params.userId) as { id: string; display_name: string } | undefined;
+  if (otherOwner) {
+    throw new Error(
+      `Anti-Triche : Le compte Trackmania "${parsed.playerLogin}" appartient déjà au joueur "${otherOwner.display_name}". Partage de replay interdit.`
+    );
   }
 
-  if (user.tmnf_login && user.tmnf_login.toLowerCase() !== parsed.playerLogin!.toLowerCase()) {
+  if (user.tmnf_login && user.tmnf_login.toLowerCase() !== parsed.playerLogin.toLowerCase()) {
     throw new Error(
       `Ce replay a été enregistré par le compte TMNF "${parsed.playerLogin}", mais votre profil est lié au login "${user.tmnf_login}".`
     );
   }
 
-  let item = db.prepare(`SELECT * FROM featured_items WHERE external_uid = ? AND active = 1`).get(parsed.mapUid) as any;
+  let item = db.prepare(`SELECT * FROM featured_items WHERE external_uid = ? AND active = 1`).get(parsed.mapUid) as
+    | FeaturedItemRow
+    | undefined;
   if (!item && params.explicitMapId) {
-    const candidate = db.prepare(`SELECT * FROM featured_items WHERE id = ? AND active = 1`).get(params.explicitMapId) as any;
+    const candidate = db.prepare(`SELECT * FROM featured_items WHERE id = ? AND active = 1`).get(params.explicitMapId) as
+      | FeaturedItemRow
+      | undefined;
     if (candidate && candidate.external_uid === parsed.mapUid) {
       item = candidate;
     }
@@ -636,21 +759,20 @@ export function submitTmnfReplay(
     );
   }
 
-  const lifecycle = getEventConfig(db);
-  const cfg = lifecycle.featured;
-  if (lifecycle.effective_phase === 'closed' || lifecycle.effective_phase === 'draft') {
-    throw new Error('L’événement est clôturé ou en préparation : les dépôts de replays sont fermés.');
-  }
-  if (item.is_ladder && !lifecycle.ladder_unlocked) {
-    throw new Error(
-      lifecycle.ladder_locked
-        ? `Le ${cfg.ladder_title} est clôturé.`
-        : `🔒 La ${cfg.ladder_title} se débloque en Semaine ${cfg.ladder_unlock_act} (Acte ${cfg.ladder_unlock_act}) !`
-    );
+  if (item.is_ladder) {
+    if (!lifecycle.ladder_unlocked) {
+      throw new Error(
+        lifecycle.ladder_locked
+          ? `Le ${cfg.ladder_title} est clôturé.`
+          : `🔒 La ${cfg.ladder_title} se débloque en Semaine ${cfg.ladder_unlock_act} (Acte ${cfg.ladder_unlock_act}) !`
+      );
+    }
+  } else if (!cfg.stages_enabled) {
+    throw new Error('Les pistes à médailles ne sont pas activées sur cette édition.');
   }
 
   const timeMs = parsed.bestTimeMs;
-  const thresholds = JSON.parse(item.thresholds_json || '{}');
+  const thresholds = parseThresholdsJson(item.thresholds_json);
   const evalRes = item.is_ladder
     ? { tierKey: 'none', tierLabel: 'Aucune', points: 0 }
     : evaluateFeaturedTier(timeMs, thresholds, cfg.tiers, 'time_asc');
@@ -676,6 +798,7 @@ export function submitTmnfReplay(
   const deltaPoints = newPoints - previousPoints;
   const isPersonalBest = prevBest?.best_time_ms === null || timeMs < prevBest.best_time_ms;
 
+  const targetItem = item;
   const tx = db.transaction(() => {
     if (!user.tmnf_login && parsed.playerLogin) {
       db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(parsed.playerLogin, params.userId);
@@ -688,7 +811,7 @@ export function submitTmnfReplay(
       ) VALUES (?, ?, ?, ?, ?, 'validated', 'gbx', ?, ?, ?, ?, datetime('now'))`
     ).run(
       params.userId,
-      item.id,
+      targetItem.id,
       timeMs,
       medal,
       medalPoints,
@@ -698,19 +821,17 @@ export function submitTmnfReplay(
       params.fileName
     );
 
-    if (!item.is_ladder && newPoints > 0) {
-      syncUserStageLedger(db, params.userId, item, cfg);
+    if (targetItem.is_ladder) {
+      syncFeaturedLadderInternal(db);
+    } else if (newPoints > 0) {
+      syncUserStageLedger(db, params.userId, targetItem, cfg);
     }
   });
   tx();
 
-  if (item.is_ladder) {
-    recalculateFeaturedLadder(db);
-  }
-
   return {
     parsed,
-    map: hydrateFeaturedItem(item, cfg),
+    map: hydrateFeaturedItem(targetItem, cfg),
     medal,
     previousPoints,
     newPoints,
@@ -726,12 +847,38 @@ export function recordTmnfLiveServerFinish(
     playerNickname?: string;
     mapUid: string;
     timeMs: number;
-  }
+  },
+  now: Date = new Date()
 ) {
+  const lifecycle = getEventConfig(db, now);
+  const cfg = lifecycle.featured;
+  if (!cfg.enabled || cfg.connector !== 'tmnf_gbx') {
+    throw new Error('Le connecteur Trackmania n’est pas actif sur cette édition.');
+  }
+  if (!isPlayablePhase(lifecycle.effective_phase)) {
+    throw new Error('L’événement est clôturé ou en préparation : les chronos serveur ne sont pas enregistrés.');
+  }
+
   const loginClean = params.playerLogin.trim().toLowerCase();
   const timeMs = Math.round(Number(params.timeMs));
-  if (!loginClean || !Number.isFinite(timeMs) || timeMs <= 1000) {
+  if (!loginClean || !Number.isFinite(timeMs) || timeMs <= 1000 || timeMs > 3600000) {
     throw new Error('Paramètres de chrono serveur invalides.');
+  }
+
+  const item = db.prepare(`SELECT * FROM featured_items WHERE external_uid = ? AND active = 1`).get(params.mapUid.trim()) as
+    | FeaturedItemRow
+    | undefined;
+  if (item) {
+    if (item.is_ladder && !lifecycle.ladder_unlocked) {
+      throw new Error(
+        lifecycle.ladder_locked
+          ? `Le ${cfg.ladder_title} est clôturé : chrono serveur ignoré.`
+          : `Le ${cfg.ladder_title} se débloque à l’Acte ${cfg.ladder_unlock_act}.`
+      );
+    }
+    if (!item.is_ladder && !cfg.stages_enabled) {
+      throw new Error('Les épreuves à paliers sont désactivées.');
+    }
   }
 
   const user = db
@@ -741,9 +888,8 @@ export function recordTmnfLiveServerFinish(
        ORDER BY CASE WHEN LOWER(tmnf_login) = ? THEN 0 ELSE 1 END ASC
        LIMIT 1`
     )
-    .get(loginClean, loginClean, loginClean) as any;
+    .get(loginClean, loginClean, loginClean) as UserRow | undefined;
 
-  const item = db.prepare(`SELECT * FROM featured_items WHERE external_uid = ? AND active = 1`).get(params.mapUid.trim()) as any;
   if (!user || !item) {
     return {
       matchedUser: user || null,
@@ -755,8 +901,7 @@ export function recordTmnfLiveServerFinish(
     };
   }
 
-  const cfg = getEventConfig(db).featured;
-  const thresholds = JSON.parse(item.thresholds_json || '{}');
+  const thresholds = parseThresholdsJson(item.thresholds_json);
   const evalRes = item.is_ladder
     ? { tierKey: 'none', tierLabel: 'Aucune', points: 0 }
     : evaluateFeaturedTier(timeMs, thresholds, cfg.tiers, 'time_asc');
@@ -785,7 +930,12 @@ export function recordTmnfLiveServerFinish(
     const syntheticHash = `live_xmlrpc_${user.id}_${item.id}_${timeMs}_${Date.now()}`;
     const tx = db.transaction(() => {
       if (!user.tmnf_login) {
-        db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(loginClean, user.id);
+        const dupLogin = db
+          .prepare(`SELECT 1 FROM users WHERE LOWER(tmnf_login) = ? AND id != ?`)
+          .get(loginClean, user.id);
+        if (!dupLogin) {
+          db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(loginClean, user.id);
+        }
       }
 
       db.prepare(
@@ -795,15 +945,13 @@ export function recordTmnfLiveServerFinish(
         ) VALUES (?, ?, ?, ?, ?, 'validated', 'xmlrpc', ?, ?, ?, 'live_server_xmlrpc', datetime('now'))`
       ).run(user.id, item.id, timeMs, medal, medalPoints, syntheticHash, loginClean, params.playerNickname || user.display_name);
 
-      if (!item.is_ladder && newPoints > 0) {
+      if (item.is_ladder) {
+        syncFeaturedLadderInternal(db);
+      } else if (newPoints > 0) {
         syncUserStageLedger(db, user.id, item, cfg);
       }
     });
     tx();
-
-    if (item.is_ladder) {
-      recalculateFeaturedLadder(db);
-    }
   }
 
   return {
@@ -822,7 +970,7 @@ export function recordTmnfLiveServerFinish(
 
 export function getFeaturedItemLeaderboard(db: Database.Database, itemId: string) {
   const cfg = getEventConfig(db).featured;
-  const item = db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(itemId) as any;
+  const item = db.prepare(`SELECT * FROM featured_items WHERE id = ?`).get(itemId) as FeaturedItemRow | undefined;
   if (!item) throw new Error('Épreuve introuvable.');
 
   const aggFn = cfg.metric_type === 'time_asc' ? 'MIN(fs.metric_value)' : 'MAX(fs.metric_value)';
@@ -847,11 +995,18 @@ export function getFeaturedItemLeaderboard(db: Database.Database, itemId: string
        JOIN users u ON u.id = fs.user_id
        WHERE fs.item_id = ? AND fs.status = 'validated'
        GROUP BY fs.user_id
-       ORDER BY best_value ${orderDir}`
+       ORDER BY best_value ${orderDir}, MIN(fs.id) ASC`
     )
-    .all(itemId) as any[];
+    .all(itemId) as {
+    user_id: string;
+    display_name: string;
+    tmnf_login: string | null;
+    best_value: number;
+    best_points: number | null;
+    best_file_name: string | null;
+  }[];
 
-  const thresholds = JSON.parse(item.thresholds_json || '{}');
+  const thresholds = parseThresholdsJson(item.thresholds_json);
   const wrVal = rows.length > 0 ? rows[0].best_value : 0;
 
   const entries = rows.map((r, idx) => {
@@ -871,31 +1026,51 @@ export function getFeaturedItemLeaderboard(db: Database.Database, itemId: string
       tier_key: evalRes.tierKey,
       tier_label: evalRes.tierLabel,
       medal: evalRes.tierKey,
-      points: r.best_points || 0,
+      points: item.is_ladder ? 0 : evalRes.points,
       delta_wr_ms: cfg.metric_type === 'time_asc' ? val - wrVal : wrVal - val,
       file_name: r.best_file_name || null,
     };
   });
 
+  const hydrated = hydrateFeaturedItem(item, cfg);
   return {
-    map: hydrateFeaturedItem(item, cfg),
-    item: hydrateFeaturedItem(item, cfg),
+    map: hydrated,
+    item: hydrated,
     entries,
   };
 }
 
-export function getUserFeaturedSummary(db: Database.Database, userId: string) {
+export interface UserFeaturedItemSummary {
+  map_id: string;
+  item_id: string;
+  best_value: number | null;
+  best_time_ms: number | null;
+  best_points: number;
+  best_formatted: string | null;
+  best_time_formatted: string | null;
+  pending: {
+    item_id: string;
+    id: number;
+    metric_value: number;
+    status: string;
+    reject_reason: string | null;
+    created_at: string;
+  } | null;
+}
+
+export function getUserFeaturedSummary(db: Database.Database, userId: string): UserFeaturedItemSummary[] {
   const cfg = getEventConfig(db).featured;
   const aggFn = cfg.metric_type === 'time_asc' ? 'MIN(metric_value)' : 'MAX(metric_value)';
 
   const validated = db
     .prepare(
-      `SELECT item_id, ${aggFn} AS best_value, MAX(points_awarded) AS best_points
-       FROM featured_submissions
-       WHERE user_id = ? AND status = 'validated'
-       GROUP BY item_id`
+      `SELECT fs.item_id, ${aggFn} AS best_value, fi.is_ladder, fi.thresholds_json
+       FROM featured_submissions fs
+       JOIN featured_items fi ON fi.id = fs.item_id
+       WHERE fs.user_id = ? AND fs.status = 'validated'
+       GROUP BY fs.item_id`
     )
-    .all(userId) as any[];
+    .all(userId) as { item_id: string; best_value: number; is_ladder: number; thresholds_json: string }[];
 
   const pending = db
     .prepare(
@@ -904,23 +1079,27 @@ export function getUserFeaturedSummary(db: Database.Database, userId: string) {
        WHERE user_id = ? AND status IN ('pending', 'rejected')
        ORDER BY id DESC`
     )
-    .all(userId) as any[];
+    .all(userId) as NonNullable<UserFeaturedItemSummary['pending']>[];
 
-  const pendingByItem = new Map<string, any>();
+  const pendingByItem = new Map<string, NonNullable<UserFeaturedItemSummary['pending']>>();
   for (const p of pending) {
     if (!pendingByItem.has(p.item_id)) pendingByItem.set(p.item_id, p);
   }
 
-  const byItem = new Map<string, any>();
+  const byItem = new Map<string, UserFeaturedItemSummary>();
   for (const r of validated) {
+    const pts = r.is_ladder
+      ? 0
+      : evaluateFeaturedTier(r.best_value, parseThresholdsJson(r.thresholds_json), cfg.tiers, cfg.metric_type).points;
+    const formatted = formatMetricValue(r.best_value, cfg.metric_type, cfg.metric_unit);
     byItem.set(r.item_id, {
       map_id: r.item_id,
       item_id: r.item_id,
       best_value: r.best_value,
       best_time_ms: r.best_value,
-      best_points: r.best_points || 0,
-      best_formatted: formatMetricValue(r.best_value, cfg.metric_type, cfg.metric_unit),
-      best_time_formatted: formatMetricValue(r.best_value, cfg.metric_type, cfg.metric_unit),
+      best_points: pts,
+      best_formatted: formatted,
+      best_time_formatted: formatted,
       pending: pendingByItem.get(r.item_id) || null,
     });
   }

@@ -1,5 +1,8 @@
 import type Database from 'better-sqlite3';
 import { getEventConfig } from './config.js';
+import type { Difficulty, GameRow, GameWithStatsRow, QuestRow, QuestWithStatsRow } from './types.js';
+
+export type { Difficulty };
 
 // ============================================================================
 // CATALOGUE JEUX & DÉFIS — CRUD + DIAGNOSTIC DE SANTÉ + IMPORT / EXPORT JSON
@@ -11,7 +14,6 @@ import { getEventConfig } from './config.js';
 //   sinon désactivation (masqué des joueurs, exclu du tirage, défis conservés).
 // ============================================================================
 
-export type Difficulty = 'easy' | 'medium' | 'hard';
 const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard'];
 
 export interface GameInput {
@@ -26,6 +28,7 @@ export interface GameInput {
 }
 
 export interface QuestInput {
+  id?: string;
   game_id?: string;
   title?: string;
   description?: string;
@@ -84,7 +87,7 @@ function uniqueId(db: Database.Database, table: 'games' | 'quests', base: string
 // LECTURE & DIAGNOSTIC DE SANTÉ
 // ---------------------------------------------------------------------------
 
-export function computeCatalogHealth(db: Database.Database, games: any[], quests: any[]) {
+export function computeCatalogHealth(db: Database.Database, games: GameWithStatsRow[], quests: QuestWithStatsRow[]) {
   const cfg = getEventConfig(db);
   const selectableActive = games.filter((g) => !g.is_universal && g.active && g.active_quest_count > 0);
   const warnings: { level: 'danger' | 'warn'; gameId?: string; message: string }[] = [];
@@ -140,7 +143,7 @@ export function listCatalog(db: Database.Database) {
        FROM games g
        ORDER BY g.sort_order ASC, g.name ASC`
     )
-    .all();
+    .all() as GameWithStatsRow[];
 
   const quests = db
     .prepare(
@@ -151,7 +154,7 @@ export function listCatalog(db: Database.Database) {
        FROM quests q
        ORDER BY q.game_id ASC, CASE q.difficulty WHEN 'easy' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC, q.unlock_week ASC, q.title ASC`
     )
-    .all();
+    .all() as QuestWithStatsRow[];
 
   return {
     games,
@@ -168,13 +171,23 @@ export function listCatalog(db: Database.Database) {
 // ---------------------------------------------------------------------------
 
 export function exportCatalog(db: Database.Database, gameId?: string) {
-  const games = gameId
-    ? db.prepare(`SELECT id, name, short_name, emoji, platforms, is_universal, logo_url, active, sort_order FROM games WHERE id = ?`).all(gameId)
-    : db.prepare(`SELECT id, name, short_name, emoji, platforms, is_universal, logo_url, active, sort_order FROM games ORDER BY sort_order ASC`).all();
+  const games = (
+    gameId
+      ? db
+          .prepare(`SELECT id, name, short_name, emoji, platforms, is_universal, logo_url, active, sort_order FROM games WHERE id = ?`)
+          .all(gameId)
+      : db
+          .prepare(`SELECT id, name, short_name, emoji, platforms, is_universal, logo_url, active, sort_order FROM games ORDER BY sort_order ASC`)
+          .all()
+  ) as GameRow[];
 
-  const quests = gameId
-    ? db.prepare(`SELECT id, game_id, title, description, difficulty, proof_hint, unlock_week, active FROM quests WHERE game_id = ?`).all(gameId)
-    : db.prepare(`SELECT id, game_id, title, description, difficulty, proof_hint, unlock_week, active FROM quests ORDER BY game_id ASC, unlock_week ASC`).all();
+  const quests = (
+    gameId
+      ? db.prepare(`SELECT id, game_id, title, description, difficulty, proof_hint, unlock_week, active FROM quests WHERE game_id = ?`).all(gameId)
+      : db
+          .prepare(`SELECT id, game_id, title, description, difficulty, proof_hint, unlock_week, active FROM quests ORDER BY game_id ASC, unlock_week ASC`)
+          .all()
+  ) as Omit<QuestRow, 'points'>[];
 
   return {
     format: 'hgw-catalog-v1',
@@ -186,7 +199,7 @@ export function exportCatalog(db: Database.Database, gameId?: string) {
 
 export function importCatalog(
   db: Database.Database,
-  payload: { games?: any[]; quests?: any[]; mode?: 'merge' | 'overwrite_matching' }
+  payload: { games?: GameInput[]; quests?: QuestInput[]; mode?: 'merge' | 'overwrite_matching' }
 ): { gamesCreated: number; gamesUpdated: number; questsCreated: number; questsUpdated: number; skipped: number } {
   if (!payload || (!Array.isArray(payload.games) && !Array.isArray(payload.quests))) {
     throw new Error('Format JSON invalide : attendez un objet contenant `games` et/ou `quests`.');
@@ -214,22 +227,25 @@ export function importCatalog(
         skipped++;
         continue;
       }
-      const existing = db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as any;
+      const existing = db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as GameRow | undefined;
       const emoji = String(g?.emoji || '🎮').trim().slice(0, 16) || '🎮';
       const platforms = String(g?.platforms || '').trim().slice(0, 200);
-      let logoUrl: string | null = null;
-      try {
-        logoUrl = normalizeLogoUrl(g?.logo_url);
-      } catch {
-        logoUrl = null;
+      let logoUrl: string | null | undefined;
+      if (g?.logo_url !== undefined) {
+        try {
+          logoUrl = normalizeLogoUrl(g.logo_url);
+        } catch {
+          logoUrl = null;
+        }
       }
       const active = g?.active === undefined ? 1 : g.active ? 1 : 0;
 
       if (existing) {
         if (overwrite) {
+          const nextLogo = logoUrl !== undefined ? logoUrl : existing.logo_url;
           db.prepare(
-            `UPDATE games SET name = ?, short_name = ?, emoji = ?, platforms = ?, active = CASE WHEN is_universal = 1 THEN 1 ELSE ? END WHERE id = ?`
-          ).run(name, shortName, emoji, platforms, active, id);
+            `UPDATE games SET name = ?, short_name = ?, emoji = ?, platforms = ?, logo_url = ?, active = CASE WHEN is_universal = 1 THEN 1 ELSE ? END WHERE id = ?`
+          ).run(name, shortName, emoji, platforms, nextLogo, active, id);
           gamesUpdated++;
         } else {
           skipped++;
@@ -239,7 +255,7 @@ export function importCatalog(
         db.prepare(
           `INSERT INTO games (id, name, short_name, emoji, platforms, is_universal, sort_order, logo_url, active)
            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`
-        ).run(id, name, shortName, emoji, platforms, maxOrder + 1, logoUrl, active);
+        ).run(id, name, shortName, emoji, platforms, maxOrder + 1, logoUrl ?? null, active);
         db.prepare(`UPDATE games SET sort_order = ? WHERE is_universal = 1`).run(maxOrder + 2);
         gamesCreated++;
       }
@@ -265,17 +281,24 @@ export function importCatalog(
       const points = cfg.quest_points[difficulty];
 
       const explicitId = q?.id ? slugify(String(q.id)) : '';
-      const existingById = explicitId ? (db.prepare(`SELECT * FROM quests WHERE id = ?`).get(explicitId) as any) : null;
+      const existingById = explicitId ? (db.prepare(`SELECT * FROM quests WHERE id = ?`).get(explicitId) as QuestRow | undefined) : undefined;
       const existingByTitle = !existingById
-        ? (db.prepare(`SELECT * FROM quests WHERE game_id = ? AND LOWER(title) = LOWER(?)`).get(gameId, title) as any)
-        : null;
+        ? (db.prepare(`SELECT * FROM quests WHERE game_id = ? AND LOWER(title) = LOWER(?)`).get(gameId, title) as QuestRow | undefined)
+        : undefined;
       const existing = existingById || existingByTitle;
 
       if (existing) {
         if (overwrite) {
+          const locked = (
+            db
+              .prepare(`SELECT COUNT(*) AS c FROM daily_assignments WHERE quest_id = ? AND status IN ('validated', 'submitted')`)
+              .get(existing.id) as { c: number }
+          ).c > 0;
+          const nextDifficulty = locked ? existing.difficulty : difficulty;
+          const nextPoints = cfg.quest_points[nextDifficulty];
           db.prepare(
-            `UPDATE quests SET title = ?, description = ?, proof_hint = ?, unlock_week = ?, active = ? WHERE id = ?`
-          ).run(title, description, proofHint, unlockWeek, active, existing.id);
+            `UPDATE quests SET title = ?, description = ?, difficulty = ?, points = ?, proof_hint = ?, unlock_week = ?, active = ? WHERE id = ?`
+          ).run(title, description, nextDifficulty, nextPoints, proofHint, unlockWeek, active, existing.id);
           questsUpdated++;
         } else {
           skipped++;
@@ -299,7 +322,7 @@ export function importCatalog(
 // JEUX
 // ---------------------------------------------------------------------------
 
-export function createGame(db: Database.Database, input: GameInput): any {
+export function createGame(db: Database.Database, input: GameInput): GameRow {
   const name = str(input.name, 'Nom', { min: 2, max: 80 })!;
   const short_name = str(input.short_name || name, 'Nom court', { min: 2, max: 30 })!;
   const emoji = str(input.emoji || '🎮', 'Emoji', { max: 16 })!;
@@ -315,11 +338,11 @@ export function createGame(db: Database.Database, input: GameInput): any {
 
   // Garde le Fil Rouge en dernier
   db.prepare(`UPDATE games SET sort_order = ? WHERE is_universal = 1`).run(maxOrder + 2);
-  return db.prepare(`SELECT * FROM games WHERE id = ?`).get(id);
+  return db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as GameRow;
 }
 
-export function updateGame(db: Database.Database, id: string, input: GameInput): any {
-  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as any;
+export function updateGame(db: Database.Database, id: string, input: GameInput): GameRow {
+  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as GameRow | undefined;
   if (!game) throw new Error('Jeu introuvable.');
 
   const next = {
@@ -340,12 +363,12 @@ export function updateGame(db: Database.Database, id: string, input: GameInput):
        logo_url = @logo_url, active = @active, sort_order = @sort_order
      WHERE id = @id`
   ).run({ ...next, id });
-  return db.prepare(`SELECT * FROM games WHERE id = ?`).get(id);
+  return db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as GameRow;
 }
 
 /** Supprime un jeu jamais utilisé. Retourne l'ancien logo pour permettre son nettoyage disque. */
 export function deleteGame(db: Database.Database, id: string): { deleted: true; logo_url: string | null } {
-  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as any;
+  const game = db.prepare(`SELECT * FROM games WHERE id = ?`).get(id) as GameRow | undefined;
   if (!game) throw new Error('Jeu introuvable.');
   if (game.is_universal) throw new Error('Le Fil Rouge ne peut pas être supprimé.');
 
@@ -384,7 +407,7 @@ function parseAct(v: unknown): number {
   return w;
 }
 
-export function createQuest(db: Database.Database, input: QuestInput): any {
+export function createQuest(db: Database.Database, input: QuestInput): QuestRow {
   const cfg = getEventConfig(db);
   const game_id = str(input.game_id, 'Jeu')!;
   if (!db.prepare(`SELECT 1 FROM games WHERE id = ?`).get(game_id)) throw new Error('Jeu introuvable.');
@@ -400,17 +423,17 @@ export function createQuest(db: Database.Database, input: QuestInput): any {
     `INSERT INTO quests (id, game_id, title, description, difficulty, points, proof_hint, unlock_week, active)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(id, game_id, title, description, difficulty, cfg.quest_points[difficulty], proof_hint, unlock_week, active);
-  return db.prepare(`SELECT * FROM quests WHERE id = ?`).get(id);
+  return db.prepare(`SELECT * FROM quests WHERE id = ?`).get(id) as QuestRow;
 }
 
-export function updateQuest(db: Database.Database, id: string, input: QuestInput): any {
+export function updateQuest(db: Database.Database, id: string, input: QuestInput): QuestRow {
   const cfg = getEventConfig(db);
-  const q = db.prepare(`SELECT * FROM quests WHERE id = ?`).get(id) as any;
+  const q = db.prepare(`SELECT * FROM quests WHERE id = ?`).get(id) as QuestRow | undefined;
   if (!q) throw new Error('Défi introuvable.');
 
   const game_id = input.game_id !== undefined ? str(input.game_id, 'Jeu')! : q.game_id;
   if (!db.prepare(`SELECT 1 FROM games WHERE id = ?`).get(game_id)) throw new Error('Jeu introuvable.');
-  const difficulty = input.difficulty !== undefined ? parseDifficulty(input.difficulty) : (q.difficulty as Difficulty);
+  const difficulty = input.difficulty !== undefined ? parseDifficulty(input.difficulty) : q.difficulty;
 
   if (difficulty !== q.difficulty || game_id !== q.game_id) {
     const validated = db
@@ -439,7 +462,7 @@ export function updateQuest(db: Database.Database, id: string, input: QuestInput
        points = @points, proof_hint = @proof_hint, unlock_week = @unlock_week, active = @active
      WHERE id = @id`
   ).run({ ...next, id });
-  return db.prepare(`SELECT * FROM quests WHERE id = ?`).get(id);
+  return db.prepare(`SELECT * FROM quests WHERE id = ?`).get(id) as QuestRow;
 }
 
 export function deleteQuest(db: Database.Database, id: string): { deleted: true } {

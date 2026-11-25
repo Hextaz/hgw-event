@@ -745,6 +745,29 @@
       <div class="hgw-modal__body"><img id="lightbox-img" alt="" /></div>
     </dialog>
 
+    <!-- DIALOGUE : CONFIRMATION / SAISIE RÉUTILISABLE -->
+    <dialog class="hgw-modal" id="action-dialog" aria-labelledby="action-dialog-title">
+      <form id="action-dialog-form" novalidate>
+        <div class="hgw-modal__head">
+          <div>
+            <h2 class="hgw-modal__title" id="action-dialog-title">Confirmation</h2>
+            <p class="hgw-card__desc" id="action-dialog-msg"></p>
+          </div>
+          <button type="button" class="hgw-btn hgw-btn--ghost hgw-btn--icon hgw-btn--sm" data-close aria-label="Fermer"><span data-icon="x"></span></button>
+        </div>
+        <div class="hgw-modal__body" id="action-dialog-input-wrap" hidden>
+          <div class="hgw-field">
+            <label class="hgw-field__label" for="action-dialog-input" id="action-dialog-label">Valeur</label>
+            <input id="action-dialog-input" class="hgw-input" maxlength="100" />
+          </div>
+        </div>
+        <div class="hgw-modal__foot">
+          <button type="button" class="hgw-btn hgw-btn--ghost" id="action-dialog-cancel">Annuler</button>
+          <button type="submit" class="hgw-btn hgw-btn--primary" id="action-dialog-ok">Confirmer</button>
+        </div>
+      </form>
+    </dialog>
+
     <!-- SCÈNE : TIRAGE DES ÉQUIPES (dynamique pour tout tournoi en équipes) -->
     <div class="stage" id="teams-stage" role="dialog" aria-modal="true" aria-labelledby="teams-stage-title">
       <div class="stage__head">

@@ -1,5 +1,13 @@
 import type Database from 'better-sqlite3';
-import { getEventConfig, updateEventConfig, type EventConfig, type EventConfigPatch } from './config.js';
+import {
+  getCurrentActDayBounds,
+  getEventConfig,
+  isPlayablePhase,
+  normalizeProofUrl,
+  updateEventConfig,
+  type EventConfig,
+  type EventConfigPatch,
+} from './config.js';
 import {
   getFeaturedItemLeaderboard,
   recalculateFeaturedLadder,
@@ -11,6 +19,16 @@ import {
   recordTournamentPlacements,
   updateTournamentRoundScores,
 } from './tournaments.js';
+import type {
+  DailyAssignmentDetailRow,
+  Difficulty,
+  FeaturedLadderEntry,
+  LeaderboardEntry,
+  QuestRow,
+  RegularitySummary,
+  TournamentRegistrationDetailRow,
+  UserRow,
+} from './types.js';
 
 // Constantes par défaut conservées pour compatibilité ascendante (les règles effectives viennent de `getEventConfig(db)`)
 export const MIN_SELECTED_GAMES = 4;
@@ -44,7 +62,7 @@ export {
   submitTmnfReplay,
 };
 
-export function recalculateWeeklyTmnfLeaderboard(db: Database.Database): any[] {
+export function recalculateWeeklyTmnfLeaderboard(db: Database.Database): FeaturedLadderEntry[] {
   return recalculateFeaturedLadder(db);
 }
 
@@ -55,7 +73,7 @@ export function getMapLeaderboard(db: Database.Database, mapId: string) {
 export function updateFallGuysScoresAndRankings(
   db: Database.Database,
   scores: { userId: string; shows: number[] }[]
-): any[] {
+): TournamentRegistrationDetailRow[] {
   return updateTournamentRoundScores(
     db,
     'fall_guys',
@@ -105,7 +123,109 @@ function shuffle<T>(items: T[]): T[] {
 }
 
 /**
- * Sauvegarde les jeux cochés par un joueur (min configuré hors Fil Rouge) et tire ses premiers défis du jour.
+ * Met à jour le login Trackmania d'un joueur en préservant l'unicité inter-joueurs
+ * et en verrouillant la modification après le premier replay GBX validé (sauf admin).
+ */
+export function updateUserTmnfLogin(
+  db: Database.Database,
+  userId: string,
+  rawLogin: string | null | undefined,
+  opts: { isAdmin?: boolean } = {}
+): string | null {
+  const user = db.prepare(`SELECT id, tmnf_login FROM users WHERE id = ?`).get(userId) as
+    | Pick<UserRow, 'id' | 'tmnf_login'>
+    | undefined;
+  if (!user) throw new Error('Utilisateur introuvable.');
+
+  const cleaned = String(rawLogin || '').trim().slice(0, 40) || null;
+  if (cleaned && cleaned.toLowerCase() === 'unknown_driver') {
+    throw new Error('Login Trackmania invalide.');
+  }
+
+  const unchanged = (user.tmnf_login || '').toLowerCase() === (cleaned || '').toLowerCase();
+  if (unchanged) return user.tmnf_login || null;
+
+  if (!opts.isAdmin && user.tmnf_login) {
+    const hasGbx = (
+      db
+        .prepare(`SELECT COUNT(*) AS c FROM featured_submissions WHERE user_id = ? AND proof_type = 'gbx' AND status = 'validated'`)
+        .get(userId) as { c: number }
+    ).c;
+    if (hasGbx > 0) {
+      throw new Error(
+        `Votre login Trackmania ("${user.tmnf_login}") est verrouillé après votre premier replay validé. Contactez un organisateur pour le modifier.`
+      );
+    }
+  }
+
+  if (cleaned) {
+    const owner = db
+      .prepare(`SELECT id, display_name FROM users WHERE LOWER(tmnf_login) = LOWER(?) AND id != ?`)
+      .get(cleaned, userId) as { id: string; display_name: string } | undefined;
+    if (owner) {
+      throw new Error(`Le login Trackmania "${cleaned}" est déjà lié au joueur "${owner.display_name}".`);
+    }
+  }
+
+  db.prepare(`UPDATE users SET tmnf_login = ? WHERE id = ?`).run(cleaned, userId);
+  return cleaned;
+}
+
+/**
+ * Calcule le nombre de défis soumis/validés par jeu sur l'acte en cours (ou la semaine ISO si pas de bornes d'acte).
+ */
+export function getUserActGameCounts(
+  db: Database.Database,
+  userId: string,
+  now: Date = new Date(),
+  excludeAssignmentId?: number
+): Map<string, number> {
+  const cfg = getEventConfig(db, now);
+  const { weekKey } = getParisDayAndWeekKey(now);
+  const { startDayKey, endDayKey } = getCurrentActDayBounds(cfg);
+
+  let rows: { game_id: string; cnt: number }[];
+  if (startDayKey) {
+    const excludeSql = excludeAssignmentId !== undefined ? ` AND da.id != ?` : '';
+    const params: (string | number)[] = [userId, startDayKey];
+    let endSql = '';
+    if (endDayKey) {
+      endSql = ` AND da.day_key < ?`;
+      params.push(endDayKey);
+    }
+    if (excludeAssignmentId !== undefined) params.push(excludeAssignmentId);
+
+    rows = db
+      .prepare(
+        `SELECT q.game_id, COUNT(*) AS cnt
+         FROM daily_assignments da
+         JOIN quests q ON q.id = da.quest_id
+         WHERE da.user_id = ? AND da.day_key >= ?${endSql} AND da.status IN ('validated', 'submitted')${excludeSql}
+         GROUP BY q.game_id`
+      )
+      .all(...params) as { game_id: string; cnt: number }[];
+  } else {
+    const excludeSql = excludeAssignmentId !== undefined ? ` AND da.id != ?` : '';
+    const params: (string | number)[] = [userId, weekKey];
+    if (excludeAssignmentId !== undefined) params.push(excludeAssignmentId);
+    rows = db
+      .prepare(
+        `SELECT q.game_id, COUNT(*) AS cnt
+         FROM daily_assignments da
+         JOIN quests q ON q.id = da.quest_id
+         WHERE da.user_id = ? AND da.week_key = ? AND da.status IN ('validated', 'submitted')${excludeSql}
+         GROUP BY q.game_id`
+      )
+      .all(...params) as { game_id: string; cnt: number }[];
+  }
+
+  const map = new Map<string, number>();
+  for (const r of rows) map.set(r.game_id, r.cnt);
+  return map;
+}
+
+/**
+ * Sauvegarde les jeux cochés par un joueur (min configuré hors Fil Rouge) et tire ses premiers défis du jour si l'édition est active.
  */
 export function saveUserSelectedGames(
   db: Database.Database,
@@ -114,6 +234,9 @@ export function saveUserSelectedGames(
   now: Date = new Date()
 ): { selectedGames: string[]; assignmentsCreated: number } {
   const cfg = getEventConfig(db, now);
+  if (cfg.effective_phase === 'draft' || cfg.effective_phase === 'closed') {
+    throw new Error('L’édition est en préparation ou clôturée : impossible de modifier vos jeux.');
+  }
   const minGames = cfg.min_selected_games;
 
   const validNonUniversal = db
@@ -138,15 +261,17 @@ export function saveUserSelectedGames(
   });
   tx();
 
-  const { dayKey } = getParisDayAndWeekKey(now);
-  const existingToday = db
-    .prepare(`SELECT COUNT(*) AS cnt FROM daily_assignments WHERE user_id = ? AND day_key = ? AND status != 'rerolled'`)
-    .get(userId, dayKey) as { cnt: number };
-
   let assignmentsCreated = 0;
-  if (existingToday.cnt === 0) {
-    const drawn = drawDailyQuestsForUser(db, userId, now);
-    assignmentsCreated = drawn.length;
+  if (isPlayablePhase(cfg.effective_phase)) {
+    const { dayKey } = getParisDayAndWeekKey(now);
+    const existingToday = db
+      .prepare(`SELECT COUNT(*) AS cnt FROM daily_assignments WHERE user_id = ? AND day_key = ? AND status != 'rerolled'`)
+      .get(userId, dayKey) as { cnt: number };
+
+    if (existingToday.cnt === 0) {
+      const drawn = drawDailyQuestsForUser(db, userId, now);
+      assignmentsCreated = drawn.length;
+    }
   }
 
   return { selectedGames: cleaned, assignmentsCreated };
@@ -155,9 +280,17 @@ export function saveUserSelectedGames(
 /**
  * Algorithme de tirage quotidien stratifié piloté par la config de l'édition.
  */
-export function drawDailyQuestsForUser(db: Database.Database, userId: string, now: Date = new Date()): any[] {
+export function drawDailyQuestsForUser(
+  db: Database.Database,
+  userId: string,
+  now: Date = new Date()
+): DailyAssignmentDetailRow[] {
   const { dayKey, weekKey } = getParisDayAndWeekKey(now);
   const cfg = getEventConfig(db, now);
+  if (!isPlayablePhase(cfg.effective_phase)) {
+    return [];
+  }
+
   const currentAct = cfg.current_act;
   const dailyCount = cfg.daily_quests_count;
   const minGames = cfg.min_selected_games;
@@ -172,7 +305,7 @@ export function drawDailyQuestsForUser(db: Database.Database, userId: string, no
        WHERE da.user_id = ? AND da.day_key = ? AND da.status != 'rerolled'
        ORDER BY da.id ASC`
     )
-    .all(userId, dayKey);
+    .all(userId, dayKey) as DailyAssignmentDetailRow[];
 
   if (currentActive.length >= dailyCount) {
     return currentActive;
@@ -187,20 +320,9 @@ export function drawDailyQuestsForUser(db: Database.Database, userId: string, no
   const universalGames = db.prepare(`SELECT id FROM games WHERE is_universal = 1 AND active = 1`).all() as { id: string }[];
   for (const ug of universalGames) candidateGameIds.add(ug.id);
 
-  const weeklyCountsRows = db
-    .prepare(
-      `SELECT q.game_id, COUNT(*) AS cnt
-       FROM daily_assignments da
-       JOIN quests q ON q.id = da.quest_id
-       WHERE da.user_id = ? AND da.week_key = ? AND da.status IN ('validated', 'submitted')
-       GROUP BY q.game_id`
-    )
-    .all(userId, weekKey) as { game_id: string; cnt: number }[];
+  const actGameCount = getUserActGameCounts(db, userId, now);
 
-  const weeklyGameCount = new Map<string, number>();
-  for (const r of weeklyCountsRows) weeklyGameCount.set(r.game_id, r.cnt);
-
-  let eligibleGames = Array.from(candidateGameIds).filter((gid) => (weeklyGameCount.get(gid) || 0) < maxPerGame);
+  let eligibleGames = Array.from(candidateGameIds).filter((gid) => (actGameCount.get(gid) || 0) < maxPerGame);
   if (eligibleGames.length === 0) {
     eligibleGames = Array.from(candidateGameIds);
   }
@@ -228,7 +350,7 @@ export function drawDailyQuestsForUser(db: Database.Database, userId: string, no
     game_id: string;
     title: string;
     description: string;
-    difficulty: 'easy' | 'medium' | 'hard';
+    difficulty: Difficulty;
     points: number;
     unlock_week: number;
   }[];
@@ -237,20 +359,20 @@ export function drawDailyQuestsForUser(db: Database.Database, userId: string, no
   const fallbackPool = shuffle(allEligibleQuests.filter((q) => !hardExclusion.has(q.id)));
 
   const needed = dailyCount - currentActive.length;
-  const pattern: ('easy' | 'medium' | 'hard')[] = ['easy', 'medium', 'hard'];
-  const targetDifficulties: ('easy' | 'medium' | 'hard')[] = Array.from(
+  const pattern: Difficulty[] = ['easy', 'medium', 'hard'];
+  const targetDifficulties: Difficulty[] = Array.from(
     { length: needed },
     (_, i) => pattern[i % pattern.length]
   );
 
   const chosen: typeof allEligibleQuests = [];
-  const chosenIds = new Set<string>(currentActive.map((a: any) => a.quest_id));
+  const chosenIds = new Set<string>(currentActive.map((a) => a.quest_id));
   const gameCountToday = new Map<string, number>();
-  for (const a of currentActive as any[]) {
+  for (const a of currentActive) {
     gameCountToday.set(a.game_id, (gameCountToday.get(a.game_id) || 0) + 1);
   }
 
-  const pickOne = (pool: typeof allEligibleQuests, diff: 'easy' | 'medium' | 'hard' | null, maxSame: number) => {
+  const pickOne = (pool: typeof allEligibleQuests, diff: Difficulty | null, maxSame: number) => {
     for (const q of pool) {
       if (chosenIds.has(q.id)) continue;
       if (diff && q.difficulty !== diff) continue;
@@ -298,7 +420,7 @@ export function drawDailyQuestsForUser(db: Database.Database, userId: string, no
        WHERE da.user_id = ? AND da.day_key = ? AND da.status != 'rerolled'
        ORDER BY CASE q.difficulty WHEN 'easy' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC`
     )
-    .all(userId, dayKey);
+    .all(userId, dayKey) as DailyAssignmentDetailRow[];
 }
 
 /**
@@ -315,7 +437,7 @@ export function runNightlyDailyReset(
     .prepare(`UPDATE daily_assignments SET status = 'expired' WHERE day_key < ? AND status = 'open'`)
     .run(dayKey);
 
-  if (cfg.effective_phase === 'draft' || cfg.effective_phase === 'closed') {
+  if (!isPlayablePhase(cfg.effective_phase)) {
     return { expiredCount: expireRes.changes, usersProcessed: 0, questsAssigned: 0 };
   }
 
@@ -349,12 +471,15 @@ export function rerollDailyAssignment(
   userId: string,
   assignmentId: number,
   now: Date = new Date()
-): any {
+): DailyAssignmentDetailRow[] {
   const { dayKey, weekKey } = getParisDayAndWeekKey(now);
   const cfg = getEventConfig(db, now);
+  if (!isPlayablePhase(cfg.effective_phase)) {
+    throw new Error('Les relances sont fermées hors période active.');
+  }
   const maxRerolls = cfg.daily_rerolls_max;
 
-  const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(userId) as any;
+  const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(userId) as UserRow | undefined;
   if (!user) throw new Error('Utilisateur introuvable.');
 
   if (maxRerolls <= 0) {
@@ -373,7 +498,7 @@ export function rerollDailyAssignment(
        JOIN quests q ON q.id = da.quest_id
        WHERE da.id = ? AND da.user_id = ?`
     )
-    .get(assignmentId, userId) as any;
+    .get(assignmentId, userId) as (DailyAssignmentDetailRow & { difficulty: Difficulty; game_id: string }) | undefined;
 
   if (!assignment) throw new Error('Défi introuvable.');
   if (assignment.day_key !== dayKey) throw new Error('Seuls les défis du jour en cours peuvent être relancés.');
@@ -395,7 +520,7 @@ export function rerollDailyAssignment(
       `SELECT * FROM quests
        WHERE active = 1 AND game_id IN (SELECT id FROM games WHERE active = 1) AND difficulty = ? AND COALESCE(unlock_week, 1) <= ? AND game_id IN (${placeholders})`
     )
-    .all(assignment.difficulty, cfg.current_act, ...gameIds) as any[];
+    .all(assignment.difficulty, cfg.current_act, ...gameIds) as QuestRow[];
 
   const available = shuffle(candidates.filter((c) => !excludeIds.has(c.id)));
   if (available.length === 0) {
@@ -405,7 +530,10 @@ export function rerollDailyAssignment(
   const replacement = available[0];
 
   const tx = db.transaction(() => {
-    db.prepare(`UPDATE daily_assignments SET status = 'rerolled' WHERE id = ?`).run(assignmentId);
+    const upd = db
+      .prepare(`UPDATE daily_assignments SET status = 'rerolled' WHERE id = ? AND status = 'open'`)
+      .run(assignmentId);
+    if (upd.changes === 0) throw new Error('Ce défi ne peut plus être relancé.');
     db.prepare(
       `INSERT INTO daily_assignments (user_id, quest_id, day_key, week_key, status)
        VALUES (?, ?, ?, ?, 'open')`
@@ -418,16 +546,9 @@ export function rerollDailyAssignment(
 }
 
 /**
- * Calcule les jours actifs et synchronise les paliers de régularité configurés dans `points_ledger`.
+ * Lecture pure (CQS) de la progression régularité d'un joueur : aucune écriture SQLite.
  */
-export function recalculateUserRegularityBonuses(
-  db: Database.Database,
-  userId: string
-): {
-  activeDaysCount: number;
-  totalBonusPoints: number;
-  tiers: { days: number; points: number; unlocked: boolean }[];
-} {
+export function getUserRegularitySummary(db: Database.Database, userId: string): RegularitySummary {
   const cfg = getEventConfig(db);
   const row = db
     .prepare(
@@ -439,38 +560,55 @@ export function recalculateUserRegularityBonuses(
 
   const activeDaysCount = row?.active_days || 0;
   let totalBonusPoints = 0;
+  const tiers = cfg.regularity_tiers.map((t) => {
+    const unlocked = activeDaysCount >= t.days;
+    if (unlocked) totalBonusPoints += t.points;
+    return { days: t.days, points: t.points, unlocked };
+  });
 
+  return { activeDaysCount, totalBonusPoints, tiers };
+}
+
+function syncUserRegularityInternal(db: Database.Database, userId: string): RegularitySummary {
+  const cfg = getEventConfig(db);
+  const summary = getUserRegularitySummary(db, userId);
+
+  db.prepare(`DELETE FROM points_ledger WHERE user_id = ? AND source_ref LIKE ?`).run(userId, `regularity:%:${userId}`);
+
+  for (const tier of cfg.regularity_tiers) {
+    const sourceRef = `regularity:tier_${tier.days}:${userId}`;
+    if (summary.activeDaysCount >= tier.days) {
+      const label = `${tier.label || `Palier Régularité — ${tier.days} Jours Actifs`} (+${tier.points} pts)`;
+      db.prepare(
+        `INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label, updated_at)
+         VALUES (?, 'daily', ?, 'async', ?, ?, datetime('now'))
+         ON CONFLICT(source_ref) DO UPDATE SET
+           points = excluded.points,
+           label = excluded.label,
+           updated_at = datetime('now')`
+      ).run(userId, sourceRef, tier.points, label);
+    }
+  }
+
+  return summary;
+}
+
+/**
+ * Calcule les jours actifs et synchronise les paliers de régularité configurés dans `points_ledger`.
+ */
+export function recalculateUserRegularityBonuses(db: Database.Database, userId: string): RegularitySummary {
+  const tx = db.transaction(() => syncUserRegularityInternal(db, userId));
+  return tx();
+}
+
+export function recalculateAllRegularityBonuses(db: Database.Database): void {
   const tx = db.transaction(() => {
-    // Nettoie d'éventuels anciens paliers supprimés de la config
-    db.prepare(`DELETE FROM points_ledger WHERE user_id = ? AND source_ref LIKE ?`).run(userId, `regularity:%:${userId}`);
-
-    for (const tier of cfg.regularity_tiers) {
-      const sourceRef = `regularity:tier_${tier.days}:${userId}`;
-      if (activeDaysCount >= tier.days) {
-        totalBonusPoints += tier.points;
-        const label = `${tier.label || `Palier Régularité — ${tier.days} Jours Actifs`} (+${tier.points} pts)`;
-        db.prepare(
-          `INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label, updated_at)
-           VALUES (?, 'daily', ?, 'async', ?, ?, datetime('now'))
-           ON CONFLICT(source_ref) DO UPDATE SET
-             points = excluded.points,
-             label = excluded.label,
-             updated_at = datetime('now')`
-        ).run(userId, sourceRef, tier.points, label);
-      }
+    const users = db.prepare(`SELECT id FROM users`).all() as { id: string }[];
+    for (const u of users) {
+      syncUserRegularityInternal(db, u.id);
     }
   });
   tx();
-
-  return {
-    activeDaysCount,
-    totalBonusPoints,
-    tiers: cfg.regularity_tiers.map((t) => ({
-      days: t.days,
-      points: t.points,
-      unlocked: activeDaysCount >= t.days,
-    })),
-  };
 }
 
 /**
@@ -484,39 +622,38 @@ export function submitDailyProof(
     proofUrl?: string;
     proofFile?: string;
     proofNote?: string;
+  },
+  now: Date = new Date()
+): DailyAssignmentDetailRow {
+  const cfg = getEventConfig(db, now);
+  if (!isPlayablePhase(cfg.effective_phase)) {
+    throw new Error('Les soumissions de défis sont fermées pour le moment.');
   }
-): any {
-  const cfg = getEventConfig(db);
+
   const assignment = db
     .prepare(
-      `SELECT da.*, q.title, q.points, q.difficulty, q.game_id, g.name AS game_name, g.emoji AS game_emoji
+      `SELECT da.*, q.title, q.description, q.points, q.difficulty, q.game_id, g.name AS game_name, g.emoji AS game_emoji
        FROM daily_assignments da
        JOIN quests q ON q.id = da.quest_id
        JOIN games g ON g.id = q.game_id
        WHERE da.id = ? AND da.user_id = ?`
     )
-    .get(params.assignmentId, params.userId) as any;
+    .get(params.assignmentId, params.userId) as DailyAssignmentDetailRow | undefined;
 
   if (!assignment) throw new Error('Défi introuvable pour cet utilisateur.');
   if (assignment.status !== 'open' && assignment.status !== 'rejected') {
     throw new Error(`Ce défi ne peut plus être soumis (statut actuel : ${assignment.status}).`);
   }
-  if (!params.proofFile && !params.proofUrl) {
+
+  const safeProofUrl = normalizeProofUrl(params.proofUrl);
+  if (!params.proofFile && !safeProofUrl) {
     throw new Error('Veuillez fournir un fichier (screenshot/clip) ou un lien vidéo externe.');
   }
 
-  const countRow = db
-    .prepare(
-      `SELECT COUNT(*) AS cnt
-       FROM daily_assignments da
-       JOIN quests q ON q.id = da.quest_id
-       WHERE da.user_id = ? AND da.week_key = ? AND q.game_id = ? AND da.status IN ('validated', 'submitted') AND da.id != ?`
-    )
-    .get(params.userId, assignment.week_key, assignment.game_id, params.assignmentId) as { cnt: number };
-
-  if (countRow.cnt >= cfg.max_quests_per_game_per_act) {
+  const actCounts = getUserActGameCounts(db, params.userId, now, params.assignmentId);
+  if ((actCounts.get(assignment.game_id) || 0) >= cfg.max_quests_per_game_per_act) {
     throw new Error(
-      `Vous avez déjà atteint la limite de ${cfg.max_quests_per_game_per_act} défis validés/soumis sur ce jeu cette semaine.`
+      `Vous avez déjà atteint la limite de ${cfg.max_quests_per_game_per_act} défis validés/soumis sur ce jeu sur cet acte.`
     );
   }
 
@@ -530,8 +667,14 @@ export function submitDailyProof(
          proof_note = ?,
          reject_reason = NULL,
          submitted_at = datetime('now')
-     WHERE id = ?`
-  ).run(proofType, params.proofUrl || null, params.proofFile || null, params.proofNote || null, params.assignmentId);
+     WHERE id = ? AND status IN ('open', 'rejected')`
+  ).run(
+    proofType,
+    safeProofUrl || null,
+    params.proofFile || null,
+    params.proofNote ? params.proofNote.trim().slice(0, 200) : null,
+    params.assignmentId
+  );
 
   return db
     .prepare(
@@ -542,11 +685,11 @@ export function submitDailyProof(
        JOIN users u ON u.id = da.user_id
        WHERE da.id = ?`
     )
-    .get(params.assignmentId);
+    .get(params.assignmentId) as DailyAssignmentDetailRow;
 }
 
 /**
- * Validation ou refus d'une preuve de défi quotidien.
+ * Validation ou refus atomique d'une preuve de défi quotidien (protège contre la double validation Web + Discord).
  */
 export function reviewDailyAssignment(
   db: Database.Database,
@@ -555,30 +698,37 @@ export function reviewDailyAssignment(
     action: 'approve' | 'reject';
     reviewerId: string;
     rejectReason?: string;
+    allowOverride?: boolean;
   }
-): any {
-  const row = db
-    .prepare(
-      `SELECT da.*, q.title, q.points, q.difficulty, g.name AS game_name, g.emoji AS game_emoji, u.display_name
-       FROM daily_assignments da
-       JOIN quests q ON q.id = da.quest_id
-       JOIN games g ON g.id = q.game_id
-       JOIN users u ON u.id = da.user_id
-       WHERE da.id = ?`
-    )
-    .get(params.assignmentId) as any;
-
-  if (!row) throw new Error(`Défi #${params.assignmentId} introuvable.`);
-
-  const sourceRef = `daily:${row.id}`;
-
+): DailyAssignmentDetailRow {
   const tx = db.transaction(() => {
+    const row = db
+      .prepare(
+        `SELECT da.*, q.title, q.description, q.points, q.difficulty, q.game_id, g.name AS game_name, g.emoji AS game_emoji, u.display_name
+         FROM daily_assignments da
+         JOIN quests q ON q.id = da.quest_id
+         JOIN games g ON g.id = q.game_id
+         JOIN users u ON u.id = da.user_id
+         WHERE da.id = ?`
+      )
+      .get(params.assignmentId) as DailyAssignmentDetailRow | undefined;
+
+    if (!row) throw new Error(`Défi #${params.assignmentId} introuvable.`);
+
+    const statusGuard = params.allowOverride ? '' : ` AND status = 'submitted'`;
+    const sourceRef = `daily:${row.id}`;
+
     if (params.action === 'approve') {
-      db.prepare(
-        `UPDATE daily_assignments
-         SET status = 'validated', reviewer_id = ?, reject_reason = NULL, reviewed_at = datetime('now')
-         WHERE id = ?`
-      ).run(params.reviewerId, row.id);
+      const res = db
+        .prepare(
+          `UPDATE daily_assignments
+           SET status = 'validated', reviewer_id = ?, reject_reason = NULL, reviewed_at = datetime('now')
+           WHERE id = ?${statusGuard}`
+        )
+        .run(params.reviewerId, row.id);
+      if (res.changes === 0) {
+        throw new Error(`La preuve #${row.id} a déjà été traitée (statut : ${row.status}).`);
+      }
 
       db.prepare(
         `INSERT INTO points_ledger (user_id, source_type, source_ref, category, points, label, updated_at)
@@ -594,35 +744,41 @@ export function reviewDailyAssignment(
         `${row.game_emoji} Défi ${row.game_name} — ${row.title} (+${row.points} pts)`
       );
     } else {
-      db.prepare(
-        `UPDATE daily_assignments
-         SET status = 'rejected', reviewer_id = ?, reject_reason = ?, reviewed_at = datetime('now')
-         WHERE id = ?`
-      ).run(params.reviewerId, params.rejectReason || 'Preuve incomplète ou non conforme.', row.id);
+      const res = db
+        .prepare(
+          `UPDATE daily_assignments
+           SET status = 'rejected', reviewer_id = ?, reject_reason = ?, reviewed_at = datetime('now')
+           WHERE id = ?${statusGuard}`
+        )
+        .run(params.reviewerId, params.rejectReason || 'Preuve incomplète ou non conforme.', row.id);
+      if (res.changes === 0) {
+        throw new Error(`La preuve #${row.id} a déjà été traitée (statut : ${row.status}).`);
+      }
 
       db.prepare(`DELETE FROM points_ledger WHERE source_ref = ?`).run(sourceRef);
     }
+
+    syncUserRegularityInternal(db, row.user_id);
   });
 
   tx();
-  recalculateUserRegularityBonuses(db, row.user_id);
 
   return db
     .prepare(
-      `SELECT da.*, q.title, q.points, q.difficulty, g.name AS game_name, g.emoji AS game_emoji, u.display_name
+      `SELECT da.*, q.title, q.description, q.points, q.difficulty, q.game_id, g.name AS game_name, g.emoji AS game_emoji, u.display_name
        FROM daily_assignments da
        JOIN quests q ON q.id = da.quest_id
        JOIN games g ON g.id = q.game_id
        JOIN users u ON u.id = da.user_id
        WHERE da.id = ?`
     )
-    .get(params.assignmentId);
+    .get(params.assignmentId) as DailyAssignmentDetailRow;
 }
 
 /**
  * Classement général dynamique (seuil tombola & compteur jeu vedette configurables).
  */
-export function getGlobalLeaderboard(db: Database.Database): any[] {
+export function getGlobalLeaderboard(db: Database.Database): LeaderboardEntry[] {
   const cfg = getEventConfig(db);
   const threshold = cfg.tombola_threshold;
 
@@ -645,7 +801,7 @@ export function getGlobalLeaderboard(db: Database.Database): any[] {
        GROUP BY u.id
        ORDER BY total_points DESC, async_points DESC, u.created_at ASC`
     )
-    .all() as any[];
+    .all() as Omit<LeaderboardEntry, 'rank' | 'tmnf_medals_count' | 'tombola_eligible' | 'tombola_progress_pct'>[];
 
   return rows.map((r, idx) => ({
     rank: idx + 1,

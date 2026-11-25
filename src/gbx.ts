@@ -134,7 +134,14 @@ export function parseReplayGbx(buffer: Buffer): ParsedGbxReplay {
     };
   }
 
-  const playerLogin = playerLoginMatch?.[1]?.trim() || 'unknown_driver';
+  const playerLogin = playerLoginMatch?.[1]?.trim();
+  if (!playerLogin) {
+    return {
+      valid: false,
+      error: 'Login joueur (<player login="..."/>) introuvable dans le replay .Replay.gbx.',
+      sha256,
+    };
+  }
   const playerNickname = playerNickMatch?.[1]?.trim() || playerLogin;
 
   return {
